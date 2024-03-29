@@ -1,6 +1,7 @@
 from typing import Type
 
 from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.bnb import BNBConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
@@ -12,6 +13,7 @@ _QUANTIZATION_CONFIG_REGISTRY = {
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
     "marlin": MarlinConfig,
+    "bnb": BNBConfig,
 }
 
 
