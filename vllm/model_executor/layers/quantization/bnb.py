@@ -162,7 +162,9 @@ class BNBLinearMethod(LinearMethodBase):
         absmax = weights["absmax"]
         
         # TODO: Init once.
-        quant_state = QuantState(absmax.contiguous().view(-1))
+        # if x.size(0) == 1:
+        #     import pdb; pdb.set_trace()
+        quant_state = QuantState(absmax.contiguous().view(-1), dtype=x.dtype)
         quant_state.shape = torch.Size([qweight.shape[0], qweight.shape[1] * self.quant_config.pack_factor])
         quant_state.blocksize = self.quant_config.blocksize
         quant_state.quant_type = self.quant_config.quant_type
@@ -174,7 +176,11 @@ class BNBLinearMethod(LinearMethodBase):
 
         # num_tokens >= threshold        
         bias = None #if self.bias is None else self.bias.to(x.dtype)
-        out = bnb.matmul_4bit(x, qweight.contiguous().view(-1,1), bias=bias, quant_state=quant_state)
+        # FIXME: Shape mismatch when bs = 1.
+        if x.size(0) == 1:
+            out = x @ bnb.functional.dequantize_4bit(qweight.contiguous().view(-1,1), quant_state=quant_state)
+        else:
+            out = bnb.matmul_4bit(x, qweight.contiguous().view(-1,1), bias=bias, quant_state=quant_state)
         return out
         # return out.reshape(out_shape)
 
