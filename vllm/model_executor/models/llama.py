@@ -58,10 +58,18 @@ class LlamaMLP(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            linear_method=linear_method)
+        # self.gate_up_proj = MergedColumnParallelLinear(
+        #     hidden_size, [intermediate_size] * 2,
+        #     bias=False,
+        #     linear_method=linear_method)
+        self.gate_proj = RowParallelLinear(hidden_size,
+                                           intermediate_size,
+                                           bias=False,
+                                           linear_method=linear_method)
+        self.up_proj = RowParallelLinear(hidden_size,
+                                           intermediate_size,
+                                           bias=False,
+                                           linear_method=linear_method)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
@@ -72,7 +80,10 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        # gate_up, _ = self.gate_up_proj(x)
+        gate, _ = self.gate_proj(x)
+        up, _ = self.up_proj(x)
+        gate_up = torch.cat([gate, up], dim=-1)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -266,6 +277,7 @@ class LlamaModel(nn.Module):
         else:
             hidden_states = self.get_input_embeddings(input_ids)
         residual = None
+        # print(f"input_ids: {input_ids.shape}")
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -370,8 +382,8 @@ class LlamaForCausalLM(nn.Module):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+            # ("gate_up_proj", "gate_proj", 0),
+            # ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
@@ -386,6 +398,7 @@ class LlamaForCausalLM(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                # import pdb; pdb.set_trace()
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:

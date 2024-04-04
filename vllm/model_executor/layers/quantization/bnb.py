@@ -54,9 +54,9 @@ class BNBConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"BNBConfig(weight_bits={self.weight_bits}, "
                 f"blocksize={self.blocksize}, "
-                f"quant_type={self.quant_type})"
-                f"quant_storage={self.quant_storage}"
-                f"compress_statistics={self.compress_statistics}")
+                f"quant_type={self.quant_type}, "
+                f"quant_storage={self.quant_storage}, "
+                f"compress_statistics={self.compress_statistics})")
 
     def get_name(self) -> str:
         return "bnb"
@@ -121,31 +121,31 @@ class BNBLinearMethod(LinearMethodBase):
 
         qweight = Parameter(
             torch.empty(
-                input_size_per_partition,
-                output_size_per_partition // self.quant_config.pack_factor,
+                output_size_per_partition,
+                input_size_per_partition // self.quant_config.pack_factor,
                 dtype=self.quant_config.quant_storage,
             ),
             requires_grad=False,
         )
         set_weight_attrs(
             qweight, {
-                "input_dim": 0,
-                "output_dim": 1,
+                "input_dim": 1,
+                "output_dim": 0,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
             })
         absmax = Parameter(
             torch.empty(
-                input_size_per_partition,
-                output_size_per_partition // self.quant_config.blocksize,
+                output_size_per_partition,
+                input_size_per_partition // self.quant_config.blocksize,
                 dtype=torch.float32,
             ),
             requires_grad=False,
         )
         set_weight_attrs(
             absmax, {
-                "input_dim": 0,
-                "output_dim": 1,
+                "input_dim": 1,
+                "output_dim": 0,
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.blocksize,
             })
@@ -164,6 +164,7 @@ class BNBLinearMethod(LinearMethodBase):
         # TODO: Init once.
         # if x.size(0) == 1:
         #     import pdb; pdb.set_trace()
+        print("x.dtype: ", x.dtype)
         quant_state = QuantState(absmax.contiguous().view(-1), dtype=x.dtype)
         quant_state.shape = torch.Size([qweight.shape[0], qweight.shape[1] * self.quant_config.pack_factor])
         quant_state.blocksize = self.quant_config.blocksize
@@ -177,10 +178,11 @@ class BNBLinearMethod(LinearMethodBase):
         # num_tokens >= threshold        
         bias = None #if self.bias is None else self.bias.to(x.dtype)
         # FIXME: Shape mismatch when bs = 1.
+        # import pdb; pdb.set_trace()
         if x.size(0) == 1:
-            out = x @ bnb.functional.dequantize_4bit(qweight.contiguous().view(-1,1), quant_state=quant_state)
+            out = x @ bnb.functional.dequantize_4bit(qweight.contiguous().view(-1,1), quant_state=quant_state).t()
         else:
-            out = bnb.matmul_4bit(x, qweight.contiguous().view(-1,1), bias=bias, quant_state=quant_state)
+            out = bnb.matmul_4bit(x, qweight.contiguous().view(-1,1).t(), bias=bias, quant_state=quant_state)
         return out
         # return out.reshape(out_shape)
 
