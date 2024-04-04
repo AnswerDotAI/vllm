@@ -244,8 +244,10 @@ class LlamaDecoderLayer(nn.Module):
         # else:
         #     hidden_states, residual = self.input_layernorm(
         #         hidden_states, residual)
-        if residual is None:
-            residual = hidden_states
+        # if residual is None:
+        #     residual = hidden_states
+        
+        residual = hidden_states
         
         hidden_states = self.input_layernorm(hidden_states)
         
@@ -320,7 +322,8 @@ class LlamaModel(nn.Module):
                 attn_metadata,
                 residual,
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
 
