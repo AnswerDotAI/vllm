@@ -164,7 +164,7 @@ class BNBLinearMethod(LinearMethodBase):
         # TODO: Init once.
         # if x.size(0) == 1:
         #     import pdb; pdb.set_trace()
-        print("x.dtype: ", x.dtype)
+        # print("x.dtype: ", x.dtype)
         quant_state = QuantState(absmax.contiguous().view(-1), dtype=x.dtype)
         quant_state.shape = torch.Size([qweight.shape[0], qweight.shape[1] * self.quant_config.pack_factor])
         quant_state.blocksize = self.quant_config.blocksize

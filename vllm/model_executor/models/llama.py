@@ -238,12 +238,17 @@ class LlamaDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        # if residual is None:
+        #     residual = hidden_states
+        #     hidden_states = self.input_layernorm(hidden_states)
+        # else:
+        #     hidden_states, residual = self.input_layernorm(
+        #         hidden_states, residual)
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+        
+        hidden_states = self.input_layernorm(hidden_states)
+        
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -251,10 +256,15 @@ class LlamaDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
 
+        hidden_states = residual + hidden_states
+
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        # hidden_states, residual = self.post_attention_layernorm(
+        #     hidden_states, residual)
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
         return hidden_states, residual
 
 
