@@ -58,18 +58,18 @@ class LlamaMLP(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
-        # self.gate_up_proj = MergedColumnParallelLinear(
-        #     hidden_size, [intermediate_size] * 2,
-        #     bias=False,
-        #     linear_method=linear_method)
-        self.gate_proj = RowParallelLinear(hidden_size,
-                                           intermediate_size,
-                                           bias=False,
-                                           linear_method=linear_method)
-        self.up_proj = RowParallelLinear(hidden_size,
-                                           intermediate_size,
-                                           bias=False,
-                                           linear_method=linear_method)
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2,
+            bias=False,
+            linear_method=linear_method)
+        # self.gate_proj = RowParallelLinear(hidden_size,
+        #                                    intermediate_size,
+        #                                    bias=False,
+        #                                    linear_method=linear_method)
+        # self.up_proj = RowParallelLinear(hidden_size,
+        #                                    intermediate_size,
+        #                                    bias=False,
+        #                                    linear_method=linear_method)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
@@ -81,10 +81,10 @@ class LlamaMLP(nn.Module):
         # self.act_fn = nn.SiLU()
 
     def forward(self, x):
-        # gate_up, _ = self.gate_up_proj(x)
-        gate, _ = self.gate_proj(x)
-        up, _ = self.up_proj(x)
-        gate_up = torch.cat([gate, up], dim=-1)
+        gate_up, _ = self.gate_up_proj(x)
+        # gate, _ = self.gate_proj(x)
+        # up, _ = self.up_proj(x)
+        # gate_up = torch.cat([gate, up], dim=-1)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         # x,_ = self.down_proj(self.act_fn(gate) * up)
@@ -128,32 +128,32 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        # self.qkv_proj = QKVParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=bias,
+            linear_method=linear_method,
+        )
+        # self.q_proj = RowParallelLinear(
+        #     self.total_num_heads * self.head_dim,
         #     hidden_size,
-        #     self.head_dim,
-        #     self.total_num_heads,
-        #     self.total_num_kv_heads,
         #     bias=bias,
         #     linear_method=linear_method,
-        # )
-        self.q_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=bias,
-            linear_method=linear_method,
-        )        
-        self.k_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=bias,
-            linear_method=linear_method,
-        )        
-        self.v_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=bias,
-            linear_method=linear_method,
-        )                        
+        # )        
+        # self.k_proj = RowParallelLinear(
+        #     self.total_num_heads * self.head_dim,
+        #     hidden_size,
+        #     bias=bias,
+        #     linear_method=linear_method,
+        # )        
+        # self.v_proj = RowParallelLinear(
+        #     self.total_num_heads * self.head_dim,
+        #     hidden_size,
+        #     bias=bias,
+        #     linear_method=linear_method,
+        # )                        
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -181,11 +181,11 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # qkv, _ = self.qkv_proj(hidden_states)
-        q,_ = self.q_proj(hidden_states)
-        k,_ = self.k_proj(hidden_states)
-        v,_ = self.v_proj(hidden_states)
-        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # q,_ = self.q_proj(hidden_states)
+        # k,_ = self.k_proj(hidden_states)
+        # v,_ = self.v_proj(hidden_states)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -329,15 +329,15 @@ class LlamaModel(nn.Module):
 
 class LlamaForCausalLM(nn.Module):
     packed_modules_mapping = {
-        # "qkv_proj": [
-        #     "q_proj",
-        #     "k_proj",
-        #     "v_proj",
-        # ],
-        # "gate_up_proj": [
-        #     "gate_proj",
-        #     "up_proj",
-        # ],
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
     }
 
     # LoRA specific attributes
@@ -417,11 +417,11 @@ class LlamaForCausalLM(nn.Module):
                      revision: Optional[str] = None):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            # ("qkv_proj", "q_proj", "q"),
-            # ("qkv_proj", "k_proj", "k"),
-            # ("qkv_proj", "v_proj", "v"),
-            # ("gate_up_proj", "gate_proj", 0),
-            # ("gate_up_proj", "up_proj", 1),
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
