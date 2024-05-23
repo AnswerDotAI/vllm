@@ -12,6 +12,8 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
+from .triton_mm import triton_mixed_mm
+
 
 class TorchaoConfig(QuantizationConfig):
     """Config class for torchao _weight_int4pack_mm.
@@ -37,6 +39,9 @@ class TorchaoConfig(QuantizationConfig):
 
         # 4 Bits packed into 32 bit datatype.
         self.pack_factor = 32 // 4
+        
+        # 4 Bits packed into 8 bit datatype
+        self.triton_pack_factor = 8 // 4
 
     def __repr__(self) -> str:
         return f"TorchaoConfig(group_size={self.group_size})"
@@ -47,7 +52,7 @@ class TorchaoConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.bfloat16]
+        return [torch.bfloat16, torch.half]
 
     @classmethod
     # Need to figure it out
@@ -116,7 +121,7 @@ class TorchaoLinearMethod(LinearMethodBase):
                              f"{input_size_per_partition} is not divisible by "
                              f"group_size = {self.quant_config.group_size}.")
 
-        # Quantized 4Bit weights packed into Int32.
+        # tinygemm: Quantized 4Bit weights packed into Int32.
         qweight = Parameter(
             torch.empty(
                 output_size_per_partition // self.quant_config.pack_factor,
@@ -155,11 +160,74 @@ class TorchaoLinearMethod(LinearMethodBase):
                 "output_dim": 1,
             },
         )
-
+        
         layer.register_parameter("qweight", qweight)
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("scales_and_zeros", scales_and_zeros)
         set_weight_attrs(scales_and_zeros, extra_weight_attrs)
+        
+        # triton-mm: Quantized 4Bit weights packed into uint8.
+        triton_qweight = Parameter(
+            torch.empty(
+                input_size_per_partition // self.quant_config.triton_pack_factor,
+                output_size_per_partition,
+                device="cuda",
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            triton_qweight,
+            {
+                "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 0,
+                "pack_factor": self.quant_config.triton_pack_factor,
+            },
+        )
+        
+        triton_scale = Parameter(
+            torch.empty(
+                input_size_per_partition // self.quant_config.group_size,
+                output_size_per_partition,
+                device="cuda",
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            triton_scale,
+            {
+                "input_dim": 0,
+                "output_dim": 1,
+            },
+        )
+        
+        triton_zero = Parameter(
+            torch.empty(
+                input_size_per_partition // self.quant_config.group_size,
+                output_size_per_partition,
+                device="cuda",
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            triton_zero,
+            {
+                "input_dim": 0,
+                "output_dim": 1,
+            },
+        )
+        
+        layer.register_parameter("triton_qweight", triton_qweight)
+        set_weight_attrs(triton_qweight, extra_weight_attrs)
+        layer.register_parameter("triton_scale", triton_scale)
+        set_weight_attrs(triton_scale, extra_weight_attrs)
+        layer.register_parameter("triton_zero", triton_zero)
+        set_weight_attrs(triton_zero, extra_weight_attrs)        
+        
+
 
     def apply(
         self,
@@ -171,12 +239,86 @@ class TorchaoLinearMethod(LinearMethodBase):
         scales_and_zeros = layer.scales_and_zeros
         output_size = qweight.size(0) * self.quant_config.pack_factor
         
+        triton_qweight = layer.triton_qweight
+        triton_scale = layer.triton_scale
+        triton_zero = layer.triton_zero
+        
         origin_x_size = x.size()
-        x_reshaped = x.reshape(-1, origin_x_size[-1])
-        c = torch.ops.aten._weight_int4pack_mm(x_reshaped, qweight, self.quant_config.group_size, scales_and_zeros)
         new_shape = origin_x_size[:-1] + (output_size,)
-        output = c.reshape(new_shape)        
-
+        x_reshaped = x.reshape(-1, origin_x_size[-1])
+        if x_reshaped.size(0) <= 32:
+            output = torch.ops.aten._weight_int4pack_mm(x_reshaped, 
+                                                        qweight, 
+                                                        self.quant_config.group_size, 
+                                                        scales_and_zeros)
+        elif x_reshaped.size(0) <= 64:
+            layer_name = layer.__class__.__name__
+            if layer_name == "QKVParallelLinear":
+                query_output_size = layer.num_heads * layer.head_size
+                key_output_size = layer.num_kv_heads * layer.head_size
+                # value_output_size = layer.num_kv_heads * layer.tp_size * layer.head_size
+                output_q = triton_mixed_mm(x_reshaped,
+                                            layer.triton_qweight[:,:query_output_size].contiguous(),
+                                            layer.triton_scale[:,:query_output_size].contiguous(),
+                                            layer.triton_zero[:,:query_output_size].contiguous(),
+                                            group_size=self.quant_config.group_size,
+                                            fp8_fast_accum=False,
+                                            kernel_type="compute_bound",
+                                            transposed=False)
+                output_k = triton_mixed_mm(x_reshaped,
+                                            layer.triton_qweight[:,query_output_size:query_output_size+key_output_size].contiguous(),
+                                            layer.triton_scale[:,query_output_size:query_output_size+key_output_size].contiguous(),
+                                            layer.triton_zero[:,query_output_size:query_output_size+key_output_size].contiguous(),
+                                            group_size=self.quant_config.group_size,
+                                            fp8_fast_accum=False,
+                                            kernel_type="compute_bound",
+                                            transposed=False)
+                output_v = triton_mixed_mm(x_reshaped,
+                                            layer.triton_qweight[:,query_output_size+key_output_size:].contiguous(),
+                                            layer.triton_scale[:,query_output_size+key_output_size:].contiguous(),
+                                            layer.triton_zero[:,query_output_size+key_output_size:].contiguous(),
+                                            group_size=self.quant_config.group_size,
+                                            fp8_fast_accum=False,
+                                            kernel_type="compute_bound",
+                                            transposed=False)
+                output = torch.cat([output_q, output_k, output_v], dim=1)
+                
+            elif layer_name == "MergedColumnParallelLinear":
+                gate_output_size = up_output_size = layer.triton_qweight.size(1) // 2
+                output_gate = triton_mixed_mm(x_reshaped,
+                                                layer.triton_qweight[:,:gate_output_size].contiguous(),
+                                                layer.triton_scale[:,:gate_output_size].contiguous(),
+                                                layer.triton_zero[:,:gate_output_size].contiguous(),
+                                                group_size=self.quant_config.group_size,
+                                                fp8_fast_accum=False,
+                                                kernel_type="compute_bound",
+                                                transposed=False)
+                output_up = triton_mixed_mm(x_reshaped,
+                                            layer.triton_qweight[:,gate_output_size:].contiguous(),
+                                            layer.triton_scale[:,gate_output_size:].contiguous(),
+                                            layer.triton_zero[:,gate_output_size:].contiguous(),
+                                            group_size=self.quant_config.group_size,
+                                            fp8_fast_accum=False,
+                                            kernel_type="compute_bound",
+                                            transposed=False)
+                output = torch.cat([output_gate, output_up], dim=1)
+                
+            else:                    
+                output = triton_mixed_mm(x_reshaped,
+                                        triton_qweight,
+                                        triton_scale,
+                                        triton_zero,
+                                        group_size=self.quant_config.group_size,
+                                        fp8_fast_accum=False,
+                                        kernel_type="compute_bound",
+                                        transposed=False)
+        else:
+            output = torch.ops.aten._weight_int4pack_mm(x_reshaped, 
+                                                        qweight, 
+                                                        self.quant_config.group_size, 
+                                                        scales_and_zeros)
+        output = output.reshape(new_shape)
+        
         if bias is not None:
             output.add_(bias)  # In-place add
 
@@ -222,7 +364,7 @@ class TorchaoDORALinearMethod(LinearMethodBase):
                              f"{input_size_per_partition} is not divisible by "
                              f"group_size = {self.quant_config.group_size}.")
 
-        # Quantized 4Bit weights packed into Int32.
+        # tinygemm: Quantized 4Bit weights packed into Int32.
         qweight = Parameter(
             torch.empty(
                 output_size_per_partition // self.quant_config.pack_factor,
@@ -266,6 +408,68 @@ class TorchaoDORALinearMethod(LinearMethodBase):
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("scales_and_zeros", scales_and_zeros)
         set_weight_attrs(scales_and_zeros, extra_weight_attrs)
+        
+        # # triton-mm: Quantized 4Bit weights packed into uint8.
+        # triton_qweight = Parameter(
+        #     torch.empty(
+        #         input_size_per_partition // self.quant_config.triton_pack_factor,
+        #         output_size_per_partition,
+        #         device="cuda",
+        #         dtype=torch.uint8,
+        #     ),
+        #     requires_grad=False,
+        # )
+        # set_weight_attrs(
+        #     triton_qweight,
+        #     {
+        #         "input_dim": 0,
+        #         "output_dim": 1,
+        #         "packed_dim": 0,
+        #         "pack_factor": self.quant_config.triton_pack_factor,
+        #     },
+        # )
+        
+        # triton_scale = Parameter(
+        #     torch.empty(
+        #         input_size_per_partition // self.quant_config.group_size,
+        #         output_size_per_partition,
+        #         device="cuda",
+        #         dtype=params_dtype,
+        #     ),
+        #     requires_grad=False,
+        # )
+        # set_weight_attrs(
+        #     triton_scale,
+        #     {
+        #         "input_dim": 0,
+        #         "output_dim": 1,
+        #     },
+        # )
+        
+        # triton_zero = Parameter(
+        #     torch.empty(
+        #         input_size_per_partition // self.quant_config.group_size,
+        #         output_size_per_partition,
+        #         device="cuda",
+        #         dtype=params_dtype,
+        #     ),
+        #     requires_grad=False,
+        # )
+        # set_weight_attrs(
+        #     triton_zero,
+        #     {
+        #         "input_dim": 0,
+        #         "output_dim": 1,
+        #     },
+        # )
+        
+        # layer.register_parameter("triton_qweight", triton_qweight)
+        # set_weight_attrs(triton_qweight, extra_weight_attrs)
+        # layer.register_parameter("triton_scale", triton_scale)
+        # set_weight_attrs(triton_scale, extra_weight_attrs)
+        # layer.register_parameter("triton_zero", triton_zero)
+        # set_weight_attrs(triton_zero, extra_weight_attrs)        
+                
         
         # DORA params.
         lora_A = Parameter(
@@ -323,12 +527,15 @@ class TorchaoDORALinearMethod(LinearMethodBase):
         output_size = qweight.size(0) * self.quant_config.pack_factor
         lora_A, lora_B, rescale = layer.lora_A, layer.lora_B, layer.rescale
         
+        # triton_qweight = layer.triton_qweight
+        # triton_scale = layer.triton_scale
+        # triton_zero = layer.triton_zero
         
         origin_x_size = x.size()
-        x_reshaped = x.reshape(-1, origin_x_size[-1])
-        c = torch.ops.aten._weight_int4pack_mm(x_reshaped, qweight, self.quant_config.group_size, scales_and_zeros)
         new_shape = origin_x_size[:-1] + (output_size,)
-        output = c.reshape(new_shape)        
+        x_reshaped = x.reshape(-1, origin_x_size[-1])
+        
+        output = torch.ops.aten._weight_int4pack_mm(x_reshaped, qweight, self.quant_config.group_size, scales_and_zeros)
         
         # rescale 
         output = rescale.view(1,-1) * (output + (x @ lora_A.t() @ lora_B.t())) 
