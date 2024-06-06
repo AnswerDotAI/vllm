@@ -12,8 +12,9 @@ from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
+import os
 from .triton_mm import triton_mixed_mm
-
+os.environ['TRITON_ALWAYS_COMPILE']="0"
 
 class TorchaoConfig(QuantizationConfig):
     """Config class for torchao _weight_int4pack_mm.
@@ -243,6 +244,7 @@ class TorchaoLinearMethod(LinearMethodBase):
         triton_scale = layer.triton_scale
         triton_zero = layer.triton_zero
         
+        # x : bs x seq_len x hidden_size
         origin_x_size = x.size()
         new_shape = origin_x_size[:-1] + (output_size,)
         x_reshaped = x.reshape(-1, origin_x_size[-1])
@@ -252,19 +254,21 @@ class TorchaoLinearMethod(LinearMethodBase):
                                                         self.quant_config.group_size, 
                                                         scales_and_zeros)
         else:
-            output = triton_mixed_mm(x_reshaped,
+            # Pad input with zeros to nearest multiple of 32 along size(0).
+            pad_multiple = 128
+            x_reshaped_padded = torch.nn.functional.pad(x_reshaped, 
+                                                        (0, 0, 0, pad_multiple - x_reshaped.size(0) % pad_multiple))
+            output = triton_mixed_mm(x_reshaped_padded,
                                     triton_qweight.T,
                                     triton_scale.T,
                                     triton_zero.T,
                                     group_size=self.quant_config.group_size,
                                     fp8_fast_accum=False,
                                     kernel_type="compute_bound",
-                                    transposed=False)            
-        # else:
-        #     output = torch.ops.aten._weight_int4pack_mm(x_reshaped, 
-        #                                                 qweight, 
-        #                                                 self.quant_config.group_size, 
-        #                                                 scales_and_zeros)
+                                    transposed=False)          
+            # get unpadded part of output.
+            output = output[:x_reshaped.size(0)]
+              
         output = output.reshape(new_shape)
         
         if bias is not None:
