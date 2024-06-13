@@ -255,7 +255,7 @@ class TorchaoLinearMethod(LinearMethodBase):
                                                         scales_and_zeros)
         else:
             # Pad input with zeros to nearest multiple of 32 along size(0).
-            pad_multiple = 128
+            pad_multiple = 32
             x_reshaped_padded = torch.nn.functional.pad(x_reshaped, 
                                                         (0, 0, 0, pad_multiple - x_reshaped.size(0) % pad_multiple))
             output = triton_mixed_mm(x_reshaped_padded,
@@ -499,7 +499,12 @@ class TorchaoDORALinearMethod(LinearMethodBase):
                                                         self.quant_config.group_size, 
                                                         scales_and_zeros)
         else:
-            output = triton_mixed_mm(x_reshaped,
+            # Pad input with zeros to nearest multiple of 32 along size(0).
+            pad_multiple = 32
+            x_reshaped_padded = torch.nn.functional.pad(x_reshaped, 
+                                                        (0, 0, 0, pad_multiple - x_reshaped.size(0) % pad_multiple))
+
+            output = triton_mixed_mm(x_reshaped_padded,
                                     triton_qweight.T,
                                     triton_scale.T,
                                     triton_zero.T,
@@ -507,6 +512,8 @@ class TorchaoDORALinearMethod(LinearMethodBase):
                                     fp8_fast_accum=False,
                                     kernel_type="compute_bound",
                                     transposed=False)     
+            
+            output = output[:x_reshaped.size(0)]
         
         # rescale 
         # output = rescale.view(1,-1) * (output + x @ lora_A.t() @ lora_B.t()) 
