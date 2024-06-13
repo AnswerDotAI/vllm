@@ -32,7 +32,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "gptq_marlin": GPTQMarlinConfig,
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
-    "torchao": TorchaoConfig
+    "torchao": TorchaoConfig,
     "compressed-tensors": CompressedTensorsConfig,
     "bitsandbytes": BitsAndBytesConfig,
 }
