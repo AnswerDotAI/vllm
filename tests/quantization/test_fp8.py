@@ -5,17 +5,30 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 import pytest
 import torch
 
+from tests.quantization.utils import is_quant_method_supported
 from vllm._custom_ops import scaled_fp8_quant
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
-capability = torch.cuda.get_device_capability()
-capability = capability[0] * 10 + capability[1]
+MODELS = [
+    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8",
+    "nm-testing/Phi-3-mini-128k-instruct-FP8",
+]
 
 
-@pytest.mark.skipif(
-    capability < QUANTIZATION_METHODS["fp8"].get_min_capability(),
-    reason="FP8 is not supported on this GPU type.")
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                    reason="FP8 is not supported on this GPU type.")
+@pytest.mark.parametrize("model", MODELS)
+def test_model_load_and_run(vllm_runner, model: str):
+    with vllm_runner(model) as llm:
+        # note: this does not test accuracy, just that we can run through
+        # see lm-eval tests for accuracy
+        outputs = llm.generate_greedy(prompts=["Hello my name is"],
+                                      max_tokens=10)
+        print(outputs[0][1])
+
+
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                    reason="FP8 is not supported on this GPU type.")
 def test_load_fp16_model(vllm_runner) -> None:
     with vllm_runner("facebook/opt-125m", quantization="fp8") as llm:
 
@@ -25,9 +38,8 @@ def test_load_fp16_model(vllm_runner) -> None:
         assert fc1.weight.dtype == torch.float8_e4m3fn
 
 
-@pytest.mark.skipif(
-    capability < QUANTIZATION_METHODS["fp8"].get_min_capability(),
-    reason="FP8 is not supported on this GPU type.")
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                    reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_scaled_fp8_quant(dtype) -> None:
 
