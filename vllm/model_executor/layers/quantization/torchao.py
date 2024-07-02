@@ -503,7 +503,7 @@ class TorchaoDORALinearMethod(LinearMethodBase):
         origin_x_size = x.size()
         new_shape = origin_x_size[:-1] + (output_size,)
         x_reshaped = x.reshape(-1, origin_x_size[-1])
-        if x_reshaped.size(0) <= 32:
+        if x_reshaped.size(0) <= 80:
             output = torch.ops.aten._weight_int4pack_mm(x_reshaped, 
                                                         qweight, 
                                                         self.quant_config.group_size, 
