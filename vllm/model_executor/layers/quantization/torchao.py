@@ -338,9 +338,18 @@ class TorchaoDORALinearMethod(LinearMethodBase):
             })        
         set_weight_attrs(rescale, extra_weight_attrs)
                 
-    @torch.compile
+    # TODO: Figure out why fullgraph=True exceeds the limit.
+    # https://discuss.pytorch.org/t/torch-compile-cache-size-limit-best-practice/200713
     def dora_layer(self, x, output, rescale, lora_A, lora_B):
         return rescale.view(1,-1) * (output + x @ lora_A.t() @ lora_B.t()) 
+        
+    # def dora_layer(self, x, output, rescale, lora_A, lora_B):
+    #     # Use in-place operations where possible
+    #     x_lora = torch.mm(x, lora_A.t())
+    #     x_lora = torch.mm(x_lora, lora_B.t())
+    #     output.add_(x_lora)
+    #     output.mul_(rescale.view(1, -1))
+    #     return output
 
     def apply(
         self,
