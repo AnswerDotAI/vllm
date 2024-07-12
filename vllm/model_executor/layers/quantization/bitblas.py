@@ -228,7 +228,7 @@ class BitBlasLinearMethod(LinearMethodBase):
         
         N = output_size_per_partition
         K = input_size_per_partition * self.layer_pack_factor
-        print(f"Tuning BitBLAS for {layer_name} with nbits {layer_nbits}-bit {K}x{N}")
+        print(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit {K}x{N}")
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
