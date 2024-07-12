@@ -134,11 +134,11 @@ class BitBlasLinearMethod(LinearMethodBase):
         del output_size  # Unused.
         
         if isinstance(self.quant_config.nbits, int):
-            self.layer_nbits = self.quant_config.nbits[layer_name]
+            self.layer_nbits = self.quant_config.nbits
             self.layer_pack_factor = self.quant_config.pack_factor
         elif isinstance(self.quant_config.nbits, Dict):
             # {layer_name: nbits}
-            self.layer_nbits = self.quant_config.nbits
+            self.layer_nbits = self.quant_config.nbits[layer_name]            
             self.layer_pack_factor = self.quant_config.pack_factor[layer_name]
         
         if self.layer_nbits == 4:
