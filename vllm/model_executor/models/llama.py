@@ -67,11 +67,13 @@ class LlamaMLP(nn.Module):
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
             bias=bias,
-            quant_config=quant_config)
+            quant_config=quant_config, 
+            layer_name="gate_up_proj")
         self.down_proj = RowParallelLinear(input_size=intermediate_size,
                                            output_size=hidden_size,
                                            bias=bias,
-                                           quant_config=quant_config)
+                                           quant_config=quant_config,
+                                           layer_name="down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
