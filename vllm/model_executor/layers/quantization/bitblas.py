@@ -46,18 +46,28 @@ class BitBlasConfig(QuantizationConfig):
 
     def __init__(
         self,
-        group_size: int,
+        group_size: Union[int, Dict],
         nbits: Union[int, Dict],
         lora_rank: int = None,
     ) -> None:
         # Group size for the quantization.
         self.group_size = group_size
         self.lora_rank = lora_rank
-        if self.group_size not in [32, 64, 128, 256]:
-            raise ValueError(
-                "Currently, only group sizes [32, 64, 128, 256] "
-                "are supported for _weight_int4pack_mm_cuda, but got group_size of "
-                f"{self.group_size}")
+        
+        if isinstance(group_size, int):        
+            if self.group_size not in [32, 64, 128, 256]:
+                raise ValueError(
+                    "Currently, only group sizes [32, 64, 128, 256] "
+                    "are supported for _weight_int4pack_mm_cuda, but got group_size of "
+                    f"{self.group_size}")
+        elif isinstance(group_size, Dict):
+            # {layer_name: group_size}
+            for k,v in group_size.items():
+                if v not in [32, 64, 128, 256]:
+                    raise ValueError(
+                        "Currently, only group sizes [32, 64, 128, 256] "
+                        "are supported for _weight_int4pack_mm_cuda, but got group_size of "
+                        f"{v}")
         
         # 4 Bits packed into 8 bit datatype
         self.nbits = nbits
@@ -146,6 +156,12 @@ class BitBlasLinearMethod(LinearMethodBase):
         else:
             raise ValueError(f"Unsupported nbits: {self.quant_config.nbits}")
         
+        if isinstance(self.quant_config.group_size, int):
+            self.layer_group_size = self.quant_config.group_size
+        elif isinstance(self.quant_config.group_size, Dict):
+            self.layer_group_size = self.quant_config.group_size[layer_name] 
+        
+        
         if params_dtype != torch.half:
             raise ValueError(
                 f"The params dtype must be half, but got {params_dtype}")
@@ -158,7 +174,7 @@ class BitBlasLinearMethod(LinearMethodBase):
                 f"{output_size_per_partition} is not divisible by "
                 f"pack_factor = {self.layer_pack_factor}.")
 
-        if (input_size_per_partition % self.quant_config.group_size != 0):
+        if (input_size_per_partition % self.layer_group_size != 0):
             raise ValueError(f"Weight input_size_per_partition = "
                              f"{input_size_per_partition} is not divisible by "
                              f"group_size = {self.quant_config.group_size}.")
@@ -185,7 +201,7 @@ class BitBlasLinearMethod(LinearMethodBase):
         scales = Parameter(
             torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.quant_config.group_size,
+                input_size_per_partition // self.layer_group_size,
                 device="cuda",
                 dtype=params_dtype,
             ),
@@ -202,7 +218,7 @@ class BitBlasLinearMethod(LinearMethodBase):
         zeros = Parameter(
             torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.quant_config.group_size,
+                input_size_per_partition // self.layer_group_size,
                 device="cuda",
                 dtype=params_dtype,
             ),
@@ -229,7 +245,7 @@ class BitBlasLinearMethod(LinearMethodBase):
         # print(f"output_size_per_partition: {output_size_per_partition}")
         # print(f"input_size_per_partition: {input_size_per_partition}")
         # print(f"Quantized Weight Shape: {qweight.size()}")
-        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit {K}x{N}")
+        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit group size {self.layer_group_size} {K}x{N}")
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
@@ -239,7 +255,7 @@ class BitBlasLinearMethod(LinearMethodBase):
                                                     out_dtype="float16",  
                                                     layout="nt",  
                                                     with_bias=False, 
-                                                    group_size=self.quant_config.group_size,
+                                                    group_size=self.layer_group_size,
                                                     with_scaling=True,  
                                                     with_zeros=True,  
                                                     zeros_mode="original",  
@@ -317,6 +333,12 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         else:
             raise ValueError(f"Unsupported nbits: {self.quant_config.nbits}")
         
+        if isinstance(self.quant_config.group_size, int):
+            self.layer_group_size = self.quant_config.group_size
+        elif isinstance(self.quant_config.group_size, Dict):
+            self.layer_group_size = self.quant_config.group_size[layer_name] 
+        
+        
         if params_dtype != torch.half:
             raise ValueError(
                 f"The params dtype must be half, but got {params_dtype}")
@@ -329,7 +351,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
                 f"{output_size_per_partition} is not divisible by "
                 f"pack_factor = {self.layer_pack_factor}.")
 
-        if (input_size_per_partition % self.quant_config.group_size != 0):
+        if (input_size_per_partition % self.layer_group_size != 0):
             raise ValueError(f"Weight input_size_per_partition = "
                              f"{input_size_per_partition} is not divisible by "
                              f"group_size = {self.quant_config.group_size}.")
@@ -356,7 +378,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         scales = Parameter(
             torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.quant_config.group_size,
+                input_size_per_partition // self.layer_group_size,
                 device="cuda",
                 dtype=params_dtype,
             ),
@@ -373,7 +395,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         zeros = Parameter(
             torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.quant_config.group_size,
+                input_size_per_partition // self.layer_group_size,
                 device="cuda",
                 dtype=params_dtype,
             ),
@@ -400,7 +422,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         # print(f"output_size_per_partition: {output_size_per_partition}")
         # print(f"input_size_per_partition: {input_size_per_partition}")
         # print(f"Quantized Weight Shape: {qweight.size()}")
-        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit {K}x{N}")
+        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit group size {self.layer_group_size} {K}x{N}")
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
@@ -410,7 +432,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
                                                     out_dtype="float16",  
                                                     layout="nt",  
                                                     with_bias=False, 
-                                                    group_size=self.quant_config.group_size,
+                                                    group_size=self.layer_group_size,
                                                     with_scaling=True,  
                                                     with_zeros=True,  
                                                     zeros_mode="original",  
