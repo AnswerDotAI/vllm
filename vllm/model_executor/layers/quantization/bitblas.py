@@ -154,11 +154,11 @@ class BitBlasLinearMethod(LinearMethodBase):
         
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
-        if output_size_per_partition % self.quant_config.pack_factor != 0:
+        if output_size_per_partition % self.layer_pack_factor != 0:
             raise ValueError(
                 f"Weight output_size_per_partition = "
                 f"{output_size_per_partition} is not divisible by "
-                f"pack_factor = {self.quant_config.pack_factor}.")
+                f"pack_factor = {self.layer_pack_factor}.")
 
         if (input_size_per_partition % self.quant_config.group_size != 0):
             raise ValueError(f"Weight input_size_per_partition = "
@@ -168,7 +168,7 @@ class BitBlasLinearMethod(LinearMethodBase):
         qweight = Parameter(
             torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.quant_config.pack_factor,
+                input_size_per_partition // self.layer_pack_factor,
                 device="cuda",
                 dtype=torch.uint8,
             ),
@@ -180,7 +180,7 @@ class BitBlasLinearMethod(LinearMethodBase):
                 "input_dim": 1,
                 "output_dim": 0,
                 "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
+                "pack_factor": self.layer_pack_factor,
             },
         )
 
@@ -257,8 +257,7 @@ class BitBlasLinearMethod(LinearMethodBase):
         qweight = layer.qweight
         scales = layer.scales
         zeros = layer.zeros
-        output_size = qweight.size(0) * self.layer_pack_factor
-        
+        output_size = qweight.size(0)
         
         # x : bs x seq_len x hidden_size
         origin_x_size = x.size()
@@ -303,22 +302,31 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         del output_size  # Unused.
         
         if isinstance(self.quant_config.nbits, int):
-            self.layer_pack_factor = self.pack_factor
+            self.layer_nbits = self.quant_config.nbits
+            self.layer_pack_factor = self.quant_config.pack_factor
         elif isinstance(self.quant_config.nbits, Dict):
             # {layer_name: nbits}
-            self.layer_pack_factor = self.pack_factor[layer_name]        
-
+            self.layer_nbits = self.quant_config.nbits[layer_name]            
+            self.layer_pack_factor = self.quant_config.pack_factor[layer_name]
+        
+        if self.layer_nbits == 4:
+            W_dtype = "uint4"
+        elif self.layer_nbits == 2:
+            W_dtype = "uint2"
+        else:
+            raise ValueError(f"Unsupported nbits: {self.quant_config.nbits}")
+        
         if params_dtype != torch.half:
             raise ValueError(
                 f"The params dtype must be half, but got {params_dtype}")
         
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
-        if output_size_per_partition % self.quant_config.pack_factor != 0:
+        if output_size_per_partition % self.layer_pack_factor != 0:
             raise ValueError(
                 f"Weight output_size_per_partition = "
                 f"{output_size_per_partition} is not divisible by "
-                f"pack_factor = {self.quant_config.pack_factor}.")
+                f"pack_factor = {self.layer_pack_factor}.")
 
         if (input_size_per_partition % self.quant_config.group_size != 0):
             raise ValueError(f"Weight input_size_per_partition = "
@@ -328,7 +336,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         qweight = Parameter(
             torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.quant_config.pack_factor,
+                input_size_per_partition // self.layer_pack_factor,
                 device="cuda",
                 dtype=torch.uint8,
             ),
@@ -340,7 +348,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
                 "input_dim": 1,
                 "output_dim": 0,
                 "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
+                "pack_factor": self.layer_pack_factor,
             },
         )
 
@@ -385,21 +393,10 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         layer.register_parameter("zeros", zeros)
         set_weight_attrs(zeros, extra_weight_attrs)
         
-        if isinstance(self.quant_config.nbits, dict):
-            layer_nbits = self.quant_config.nbits[layer_name]
-        elif isinstance(self.quant_config.nbits, int):
-            layer_nbits = self.quant_config.nbits
-            
-        if layer_nbits == 4:
-            W_dtype = "uint4"
-        elif layer_nbits == 2:
-            W_dtype = "uint2"
-        else:
-            raise ValueError(f"Unsupported nbits: {self.quant_config.nbits}")
         
         N = output_size_per_partition
         K = input_size_per_partition * self.layer_pack_factor
-        print(f"Tuning BitBLAS for {layer_name} with nbits {layer_nbits}-bit {K}x{N}")
+        print(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit {K}x{N}")
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
@@ -485,7 +482,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         qweight = layer.qweight
         scales = layer.scales
         zeros = layer.zeros
-        output_size = qweight.size(0) * self.quant_config.pack_factor
+        output_size = qweight.size(0)
         lora_A, lora_B, rescale = layer.lora_A, layer.lora_B, layer.rescale
         
         
