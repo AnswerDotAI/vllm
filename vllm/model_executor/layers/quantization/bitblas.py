@@ -12,8 +12,6 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from typing import Union, Dict
 
-
-
 logger = init_logger(__name__)
 
 import os
@@ -36,9 +34,9 @@ def _get_or_create_bitblas_operator(config):
 		bitblas_matmul.hardware_aware_finetune(topk=20)
 		global_operator_cache.add(config, bitblas_matmul)
 		global_operator_cache.save_into_database(BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
-		print("BitBLAS Tuning done, appended operator to global_operator_cache.")
+		logger.info("BitBLAS Tuning done, appended operator to global_operator_cache.")
 	else:
-		print("BitBLAS Operator found in global_operator_cache.")
+		logger.info("BitBLAS Operator found in global_operator_cache.")
 	return bitblas_matmul
 
 
@@ -226,9 +224,12 @@ class BitBlasLinearMethod(LinearMethodBase):
         set_weight_attrs(zeros, extra_weight_attrs)
         
         
-        N = output_size_per_partition
-        K = input_size_per_partition * self.layer_pack_factor
-        print(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit {K}x{N}")
+        K = input_size_per_partition # this is the dequantized input size
+        N = output_size_per_partition # this is the dequantized output size
+        # print(f"output_size_per_partition: {output_size_per_partition}")
+        # print(f"input_size_per_partition: {input_size_per_partition}")
+        # print(f"Quantized Weight Shape: {qweight.size()}")
+        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit {K}x{N}")
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
@@ -394,9 +395,12 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         set_weight_attrs(zeros, extra_weight_attrs)
         
         
-        N = output_size_per_partition
-        K = input_size_per_partition * self.layer_pack_factor
-        print(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit {K}x{N}")
+        K = input_size_per_partition # this is the dequantized input size
+        N = output_size_per_partition # this is the dequantized output size
+        # print(f"output_size_per_partition: {output_size_per_partition}")
+        # print(f"input_size_per_partition: {input_size_per_partition}")
+        # print(f"Quantized Weight Shape: {qweight.size()}")
+        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit {K}x{N}")
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
