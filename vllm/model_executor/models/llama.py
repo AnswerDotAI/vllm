@@ -442,11 +442,18 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                         continue
                     else:
                         name = remapped_kv_scale_name
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-
+                
+                if name in params_dict:
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                else: 
+                    # for running without dora layers. quantized only.
+                    print_warning_once(
+                        f"Found weight in the checkpoint ({name}), but not "
+                        "found the expected name in the model. The weight is "
+                        "not loaded.")
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
     # make sure to leave KV cache scale factors in a known good (dummy) state
