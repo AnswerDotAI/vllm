@@ -2,7 +2,11 @@ import asyncio
 import os
 from typing import List, Optional
 
-from ray.exceptions import ActorDiedError
+try:
+    from ray.exceptions import ActorDiedError
+except ImportError:
+    # For older versions of Ray
+    from ray.exceptions import RayActorError as ActorDiedError
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizer
 
@@ -25,8 +29,10 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
     _worker_cls = TokenizerGroup
 
     @classmethod
-    def from_config(cls, tokenizer_pool_config: TokenizerPoolConfig,
+    def from_config(cls, tokenizer_pool_config: Optional[TokenizerPoolConfig],
                     **init_kwargs) -> "RayTokenizerGroupPool":
+        if not tokenizer_pool_config:
+            raise ValueError("tokenizer_pool_config must not be None.")
         ray_actor_options = (tokenizer_pool_config.extra_config or {
             "num_cpus": 0
         })

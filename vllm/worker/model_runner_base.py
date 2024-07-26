@@ -5,7 +5,9 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
 
 import torch
 
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.platforms import current_platform
+from vllm.sequence import (IntermediateTensors, SamplerOutput,
+                           SequenceGroupMetadata)
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -112,6 +114,21 @@ class ModelRunnerInputBase(ABC):
         raise NotImplementedError
 
 
+class ModelRunnerInputBuilderBase(ABC, Generic[T]):
+    """A builder to create ModelRunnerInputBase objects.
+  """
+
+    @abstractmethod
+    def add_seq_group(self, seq_group_metadata):
+        """TBA"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def build(self, *args, **kwargs) -> T:
+        """Build metadata with on-device tensors."""
+        raise NotImplementedError
+
+
 class ModelRunnerBase(ABC, Generic[T]):
     """
     Model runner interface that abstracts a particular hardware and/or type of
@@ -137,6 +154,8 @@ class ModelRunnerBase(ABC, Generic[T]):
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> T:
         """
         Prepare the inputs to ModelRunnerBase.execute_model from an execution
@@ -145,11 +164,12 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @torch.inference_mode()
+    @current_platform.inference_mode()
     def execute_model(
         self,
         model_input: T,
         kv_caches: Optional[List[torch.Tensor]],
+        intermediate_tensors: Optional[IntermediateTensors],
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         """
