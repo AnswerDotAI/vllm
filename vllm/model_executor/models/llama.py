@@ -71,7 +71,6 @@ class LlamaMLP(nn.Module):
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
             bias=bias,
-            quant_config=quant_config, 
             layer_name="gate_up_proj",
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj")
