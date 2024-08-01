@@ -493,11 +493,16 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
 
                 if is_pp_missing_parameter(name, self):
                     continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-
+                if name in params_dict:
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                else: 
+                    # for running without dora layers. quantized only.
+                    print(
+                        f"Found weight in the checkpoint ({name}), but not "
+                        "found the expected name in the model. The weight is "
+                        "not loaded.")
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
