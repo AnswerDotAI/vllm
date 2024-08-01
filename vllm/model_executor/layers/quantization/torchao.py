@@ -74,7 +74,7 @@ class TorchaoConfig(QuantizationConfig):
         return cls(group_size, inner_k_tiles, lora_rank)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["TorchaoLinearMethod"]:
+            self, layer: torch.nn.Module, prefix:str) -> Optional["TorchaoLinearMethod"]:
         if isinstance(layer, LinearBase):
             if self.lora_rank is None:
                 return TorchaoLinearMethod(self)
