@@ -140,7 +140,7 @@ class LlamaAttention(nn.Module):
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
-            layer_name="qkv_proj"
+            layer_name="qkv_proj",
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
