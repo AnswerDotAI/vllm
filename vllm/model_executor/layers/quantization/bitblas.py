@@ -106,7 +106,7 @@ class BitBlasConfig(QuantizationConfig):
         return cls(group_size, nbits, lora_rank)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["BitBlasLinearMethod"]:
+            self, layer: torch.nn.Module, prefix:str) -> Optional["BitBlasLinearMethod"]:
         if isinstance(layer, LinearBase):
             if self.lora_rank is None:
                 return BitBlasLinearMethod(self)
