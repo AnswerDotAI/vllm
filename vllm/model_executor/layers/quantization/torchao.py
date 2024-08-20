@@ -29,11 +29,13 @@ class TorchaoConfig(QuantizationConfig):
         group_size: int,
         inner_k_tiles: int,
         lora_rank: int = None,
+        skipped_dora_layers: List[str] = [],
     ) -> None:
         # Group size for the quantization.
         self.group_size = group_size
         self.inner_k_tiles = inner_k_tiles
         self.lora_rank = lora_rank
+        self.skipped_dora_layers = skipped_dora_layers
         if self.group_size not in [32, 64, 128, 256]:
             raise ValueError(
                 "Currently, only group sizes [32, 64, 128, 256] "
@@ -71,12 +73,14 @@ class TorchaoConfig(QuantizationConfig):
         group_size = cls.get_from_keys(config, ["group_size"])
         inner_k_tiles = config.get("inner_k_tiles", 8)
         lora_rank = config.get("lora_rank", None)
-        return cls(group_size, inner_k_tiles, lora_rank)
+        skipped_dora_layers = config.get("skipped_dora_layers", [])
+        return cls(group_size, inner_k_tiles, lora_rank, skipped_dora_layers)
 
     def get_quant_method(
             self, layer: torch.nn.Module, prefix:str) -> Optional["TorchaoLinearMethod"]:
         if isinstance(layer, LinearBase):
-            if self.lora_rank is None:
+            if self.lora_rank is None or any(l in prefix for l in self.skipped_dora_layers):
+                print(f"Using TorchaoLinearMethod for skipped: {prefix}")
                 return TorchaoLinearMethod(self)
             else:
                 return TorchaoDORALinearMethod(self)
