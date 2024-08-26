@@ -50,11 +50,13 @@ class BitBlasConfig(QuantizationConfig):
         nbits: Union[int, Dict],
         lora_rank: int = None,
         skipped_dora_layers: List[str] = [],
+        block_influence_layers: List[str] = [],
     ) -> None:
         # Group size for the quantization.
         self.group_size = group_size
         self.lora_rank = lora_rank
         self.skipped_dora_layers = skipped_dora_layers
+        self.block_influence_layers = block_influence_layers
         
         if isinstance(group_size, int):        
             if self.group_size not in [32, 64, 128, 256]:
@@ -106,14 +108,22 @@ class BitBlasConfig(QuantizationConfig):
         nbits = cls.get_from_keys(config, ["nbits"])
         lora_rank = config.get("lora_rank", None)
         skipped_dora_layers = config.get("skipped_dora_layers", [])
-        return cls(group_size, nbits, lora_rank, skipped_dora_layers)
+        block_influence_layers = config.get("block_influence_layers", [])
+        return cls(group_size, nbits, lora_rank, skipped_dora_layers, block_influence_layers)
 
     def get_quant_method(
             self, layer: torch.nn.Module, prefix:str) -> Optional["BitBlasLinearMethod"]:
         if isinstance(layer, LinearBase):
+            
+            print(f"Getting Quant Method for {prefix}")
+            print(f"Block Influence layers: {self.block_influence_layers}")
+            
             if self.lora_rank is None or any(l in prefix for l in self.skipped_dora_layers):
                 print(f"Using BitBlasLinearMethod for skipped: {prefix}")
                 return BitBlasLinearMethod(self)
+            elif any(l in prefix for l in self.block_influence_layers):
+                print(f"Using BitBlasDORALinearMethod for block influence: {prefix}")
+                return BitBlasDORALinearMethod(self, is_block_influence=True)
             else:
                 return BitBlasDORALinearMethod(self)
         return None
@@ -305,9 +315,10 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         quant_config: The bitblas quantization config.
     """
     
-    def __init__(self, quant_config: BitBlasConfig):
+    def __init__(self, quant_config: BitBlasConfig, is_block_influence=False):
         self.quant_config = quant_config
         self.BITBLAS_OPT_M = [1, 16, 32, 64, 128, 256, 512]
+        self.is_block_influence = is_block_influence
 
     def create_weights(
         self,
@@ -322,7 +333,11 @@ class BitBlasDORALinearMethod(LinearMethodBase):
     ):
         del output_size  # Unused.
         
-        if isinstance(self.quant_config.nbits, int):
+        if self.is_block_influence:
+            # block influence layers use higher bit precision.
+            self.layer_nbits = 4
+            self.layer_pack_factor = 2
+        elif isinstance(self.quant_config.nbits, int):
             self.layer_nbits = self.quant_config.nbits
             self.layer_pack_factor = self.quant_config.pack_factor
         elif isinstance(self.quant_config.nbits, Dict):
@@ -337,7 +352,9 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         else:
             raise ValueError(f"Unsupported nbits: {self.quant_config.nbits}")
         
-        if isinstance(self.quant_config.group_size, int):
+        if self.is_block_influence:
+            self.layer_group_size = 128 # hardcoded for 4bit now
+        elif isinstance(self.quant_config.group_size, int):
             self.layer_group_size = self.quant_config.group_size
         elif isinstance(self.quant_config.group_size, Dict):
             self.layer_group_size = self.quant_config.group_size[layer_name] 

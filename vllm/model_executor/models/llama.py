@@ -468,6 +468,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
+            print(f"Loading {name}")
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -526,6 +527,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                         f"Found weight in the checkpoint ({name}), but not "
                         "found the expected name in the model. The weight is "
                         "not loaded.")
+            
+            print(f"Loaded {name}")
+            
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
     # make sure to leave KV cache scale factors in a known good (dummy) state
