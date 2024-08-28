@@ -19,9 +19,10 @@ import os
 # os.environ['TRITON_ALWAYS_COMPILE']="0"
 import bitblas
 from bitblas.cache import global_operator_cache
-from bitblas.module import BITBLAS_TARGET, BITBLAS_DATABASE_PATH
+from bitblas.module import auto_detect_nvidia_target, BITBLAS_DATABASE_PATH
 
 BITBLAS_DATABASE_PATH = "/workspace/.cache/bitblas"
+BITBLAS_TARGET = auto_detect_nvidia_target()
 
 def _get_or_create_bitblas_operator(config):
 	if global_operator_cache.size() == 0:
@@ -121,7 +122,7 @@ class BitBlasConfig(QuantizationConfig):
             if self.lora_rank is None or any(l in prefix for l in self.skipped_dora_layers):
                 print(f"Using BitBlasLinearMethod for skipped: {prefix}")
                 return BitBlasLinearMethod(self)
-            elif any(l in prefix for l in self.block_influence_layers):
+            elif any(l + "." in prefix for l in self.block_influence_layers):
                 print(f"Using BitBlasDORALinearMethod for block influence: {prefix}")
                 return BitBlasDORALinearMethod(self, is_block_influence=True)
             else:
@@ -353,7 +354,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
             raise ValueError(f"Unsupported nbits: {self.quant_config.nbits}")
         
         if self.is_block_influence:
-            self.layer_group_size = 128 # hardcoded for 4bit now
+            self.layer_group_size = 128 # FIXME: hardcoded for 4bit now
         elif isinstance(self.quant_config.group_size, int):
             self.layer_group_size = self.quant_config.group_size
         elif isinstance(self.quant_config.group_size, Dict):
