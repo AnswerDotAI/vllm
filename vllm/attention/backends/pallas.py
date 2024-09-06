@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
-import torch_xla.experimental.dynamo_set_buffer_donor
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonAttentionState
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -18,6 +18,10 @@ class PallasAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["PallasMetadata"]:
         return PallasMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -55,8 +59,8 @@ class PallasMetadata(AttentionMetadata):
 
     # Currently, input sequences can only contain all prefills
     # or all decoding.
-    block_tables: Optional[torch.Tensor]
-    context_lens: Optional[torch.Tensor]
+    block_tables: Optional[torch.Tensor] = None
+    context_lens: Optional[torch.Tensor] = None
 
     @property
     def prefill_metadata(self) -> Optional["PallasMetadata"]:
@@ -92,6 +96,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -110,6 +115,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
         if blocksparse_params is not None:
             raise NotImplementedError("Blocksparse is not supported.")
+        if logits_soft_cap is not None:
+            raise NotImplementedError(
+                "Attention logits soft-capping is not supported.")
 
         if torch_xla.tpu.version() < 4:
             raise NotImplementedError("TPU version must be 4 or higher.")
