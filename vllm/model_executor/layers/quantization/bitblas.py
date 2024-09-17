@@ -52,12 +52,14 @@ class BitBlasConfig(QuantizationConfig):
         lora_rank: int = None,
         skipped_dora_layers: List[str] = [],
         block_influence_layers: List[str] = [],
+        bitblas_dtype: str = "float16",
     ) -> None:
         # Group size for the quantization.
         self.group_size = group_size
         self.lora_rank = lora_rank
         self.skipped_dora_layers = skipped_dora_layers
         self.block_influence_layers = block_influence_layers
+        self.bitblas_dtype = getattr(torch, bitblas_dtype)
         
         if isinstance(group_size, int):        
             if self.group_size not in [32, 64, 128, 256]:
@@ -92,7 +94,7 @@ class BitBlasConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.half, torch.bfloat16]
 
     @classmethod
     # Need to figure it out
@@ -110,7 +112,8 @@ class BitBlasConfig(QuantizationConfig):
         lora_rank = config.get("lora_rank", None)
         skipped_dora_layers = config.get("skipped_dora_layers", [])
         block_influence_layers = config.get("block_influence_layers", [])
-        return cls(group_size, nbits, lora_rank, skipped_dora_layers, block_influence_layers)
+        bitblas_dtype = config.get("bitblas_dtype", "float16")
+        return cls(group_size, nbits, lora_rank, skipped_dora_layers, block_influence_layers, bitblas_dtype)
 
     def get_quant_method(
             self, layer: torch.nn.Module, prefix:str) -> Optional["BitBlasLinearMethod"]:
@@ -141,6 +144,7 @@ class BitBlasLinearMethod(LinearMethodBase):
     
     def __init__(self, quant_config: BitBlasConfig):
         self.quant_config = quant_config
+        self.bitblas_dtype = quant_config.bitblas_dtype
         self.BITBLAS_OPT_M = [1, 16, 32, 64, 128, 256, 512]
 
     def create_weights(
@@ -176,10 +180,9 @@ class BitBlasLinearMethod(LinearMethodBase):
         elif isinstance(self.quant_config.group_size, Dict):
             self.layer_group_size = self.quant_config.group_size[layer_name] 
         
-        
-        if params_dtype != torch.half:
-            raise ValueError(
-                f"The params dtype must be half, but got {params_dtype}")
+        # if params_dtype != torch.half:
+        #     raise ValueError(
+        #         f"The params dtype must be half, but got {params_dtype}")
         
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
@@ -264,10 +267,10 @@ class BitBlasLinearMethod(LinearMethodBase):
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
-                                                    A_dtype="float16",  
+                                                    A_dtype="bfloat16" if self.bitblas_dtype == torch.bfloat16 else "float16",
                                                     W_dtype=W_dtype,  
-                                                    accum_dtype="float16",  
-                                                    out_dtype="float16",  
+                                                    accum_dtype="float32" if self.bitblas_dtype == torch.bfloat16 else "float16",
+                                                    out_dtype="float16",
                                                     layout="nt",  
                                                     with_bias=False, 
                                                     group_size=self.layer_group_size,
@@ -296,7 +299,7 @@ class BitBlasLinearMethod(LinearMethodBase):
         new_shape = origin_x_size[:-1] + (output_size,)
         x_reshaped = x.reshape(-1, origin_x_size[-1])
         
-        output = self.matmul_eng(x_reshaped, qweight, scales, zeros)
+        output = self.matmul_eng(x_reshaped, qweight, scales, zeros).to(self.bitblas_dtype)
 
         output = output.reshape(new_shape)
         
@@ -318,6 +321,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
     
     def __init__(self, quant_config: BitBlasConfig, is_block_influence=False):
         self.quant_config = quant_config
+        self.bitblas_dtype = quant_config.bitblas_dtype
         self.BITBLAS_OPT_M = [1, 16, 32, 64, 128, 256, 512]
         self.is_block_influence = is_block_influence
 
@@ -361,9 +365,9 @@ class BitBlasDORALinearMethod(LinearMethodBase):
             self.layer_group_size = self.quant_config.group_size[layer_name] 
         
         
-        if params_dtype != torch.half:
-            raise ValueError(
-                f"The params dtype must be half, but got {params_dtype}")
+        # if params_dtype != torch.half:
+        #     raise ValueError(
+        #         f"The params dtype must be half, but got {params_dtype}")
         
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
@@ -444,13 +448,13 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         # print(f"output_size_per_partition: {output_size_per_partition}")
         # print(f"input_size_per_partition: {input_size_per_partition}")
         # print(f"Quantized Weight Shape: {qweight.size()}")
-        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit group size {self.layer_group_size} {K}x{N}")
+        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit group size {self.layer_group_size} {K}x{N} dtype {self.bitblas_dtype}")
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
-                                                    A_dtype="float16",  
+                                                    A_dtype="bfloat16" if self.bitblas_dtype == torch.bfloat16 else "float16",
                                                     W_dtype=W_dtype,  
-                                                    accum_dtype="float16",  
+                                                    accum_dtype="float32" if self.bitblas_dtype == torch.bfloat16 else "float16",
                                                     out_dtype="float16",  
                                                     layout="nt",  
                                                     with_bias=False, 
@@ -539,7 +543,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         new_shape = origin_x_size[:-1] + (output_size,)
         x_reshaped = x.reshape(-1, origin_x_size[-1])
         
-        output = self.matmul_eng(x_reshaped, qweight, scales, zeros)
+        output = self.matmul_eng(x_reshaped, qweight, scales, zeros).to(self.bitblas_dtype)
 
         output = output.reshape(new_shape)
 
