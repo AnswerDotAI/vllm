@@ -167,7 +167,7 @@ class GemLiteLinearMethod(LinearMethodBase):
                 input_size_per_partition // self.layer_pack_factor,
                 output_size_per_partition,
                 device="cuda",
-                dtype=torch.uint8,
+                dtype=torch.int32,
             ),
             requires_grad=False,
         )
@@ -285,7 +285,7 @@ class GemLiteDORALinearMethod(LinearMethodBase):
         if self.is_block_influence:
             # block influence layers use higher bit precision.
             self.layer_nbits = 4
-            self.layer_pack_factor = 2
+            self.layer_pack_factor = self.quant_config.pack_bit // self.layer_nbits
         elif isinstance(self.quant_config.nbits, int):
             self.layer_nbits = self.quant_config.nbits
             self.layer_pack_factor = self.quant_config.pack_factor
@@ -323,7 +323,7 @@ class GemLiteDORALinearMethod(LinearMethodBase):
                 input_size_per_partition // self.layer_pack_factor,
                 output_size_per_partition,
                 device="cuda",
-                dtype=torch.uint8,
+                dtype=torch.int32,
             ),
             requires_grad=False,
         )

@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization.qqq import QQQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 from vllm.model_executor.layers.quantization.torchao import TorchaoConfig
 from vllm.model_executor.layers.quantization.bitblas import BitBlasConfig
-from vllm.model_executor.layers.quantization.gemlite import GemliteConfig
+from vllm.model_executor.layers.quantization.gemlite import GemLiteConfig
 from vllm.model_executor.layers.quantization.tpu_int8 import Int8TpuConfig
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
@@ -47,7 +47,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "squeezellm": SqueezeLLMConfig,
     "torchao": TorchaoConfig,
     "bitblas": BitBlasConfig,
-    "gemlite": GemliteConfig,
+    "gemlite": GemLiteConfig,
     "compressed-tensors": CompressedTensorsConfig,
     "bitsandbytes": BitsAndBytesConfig,
     "qqq": QQQConfig,
