@@ -35,7 +35,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear, 
+                                               ColumnParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -80,6 +81,16 @@ class LlamaMLP(nn.Module):
                                            quant_config=quant_config,
                                            layer_name="down_proj",
                                            prefix=f"{prefix}.down_proj")
+        
+        # self.down_proj = ColumnParallelLinear(input_size=intermediate_size,
+        #                                     output_size=hidden_size,
+        #                                     bias=bias,
+        #                                     gather_output=True,
+        #                                     quant_config=quant_config,
+        #                                     layer_name="down_proj",
+        #                                     prefix=f"{prefix}.down_proj")
+        # print("Initialized down_proj with ColumnParallelLinear")
+            
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -152,6 +163,16 @@ class LlamaAttention(nn.Module):
             layer_name="o_proj",
             prefix=f"{prefix}.o_proj",
         )
+        
+        # self.o_proj = ColumnParallelLinear(
+        #     input_size=self.total_num_heads * self.head_dim,
+        #     output_size=hidden_size,
+        #     bias=bias,
+        #     gather_output=True,
+        #     quant_config=quant_config,
+        #     layer_name="o_proj",
+        #     prefix=f"{prefix}.o_proj",
+        # )        
 
         is_neox_style = True
         if quant_config is not None and quant_config.get_name() == "gguf":
