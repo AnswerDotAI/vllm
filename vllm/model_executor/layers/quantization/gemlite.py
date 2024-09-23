@@ -244,10 +244,12 @@ class GemLiteLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         
         # Init gemlite linear weights.
-        if not hasattr(self.gemlite_linear, "W_q"):
+        if self.gemlite_linear.W_q.device.type == "meta":
             self.gemlite_linear.W_q = layer.qweight
             self.gemlite_linear.scales = layer.scales
             self.gemlite_linear.zeros = layer.zeros
+            self.gemlite_linear.bias = None
+            print(f"Initialized gemlite linear weights for {layer}")
         
         # x : bs x seq_len x hidden_size
         output = self.gemlite_linear(x)
@@ -450,16 +452,34 @@ class GemLiteDORALinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         
         # Init gemlite linear weights.
-        if not hasattr(self.gemlite_linear, "W_q"):
+        if self.gemlite_linear.W_q.device.type == "meta":
             self.gemlite_linear.W_q = layer.qweight
             self.gemlite_linear.scales = layer.scales
             self.gemlite_linear.zeros = layer.zeros
+            self.gemlite_linear.bias = None
+            print(f"Initialized gemlite linear weights for {layer}")
             
         lora_A, lora_B, rescale = layer.lora_A, layer.lora_B, layer.rescale
         
         # x : bs x seq_len x hidden_size
-        output = self.gemlite_linear(x)
-                
+        try:
+            output = self.gemlite_linear(x)
+        except Exception as e:
+            
+            print(f"Error in gemlite_linear: {layer}")
+            print(f"x.shape: {x.shape}")
+            print(f"self.gemlite_linear.W_q.shape: {self.gemlite_linear.W_q.shape}")
+            print(f"self.gemlite_linear.scales.shape: {self.gemlite_linear.scales.shape}")
+            print(f"self.gemlite_linear.zeros.shape: {self.gemlite_linear.zeros.shape}")
+            print(f"self.gemlite_linear.group_size: {self.gemlite_linear.group_size}")
+            print(f"self.gemlite_linear.in_features: {self.gemlite_linear.in_features}")
+            print(f"self.gemlite_linear.out_features: {self.gemlite_linear.out_features}")
+            print(f"self.gemlite_linear.input_dtype: {self.gemlite_linear.input_dtype}")
+            print(f"self.gemlite_linear.output_dtype: {self.gemlite_linear.output_dtype}")
+            print(f"self.gemlite_linear.acc_dtype: {self.gemlite_linear.acc_dtype}")
+            print(f"self.gemlite_linear.signature: {self.gemlite_linear.signature}")
+            raise e
+            
         # rescale 
         # output = rescale.view(1,-1) * (output + x @ lora_A.t() @ lora_B.t()) 
         output = self.dora_layer(x, output, rescale, lora_A, lora_B)
