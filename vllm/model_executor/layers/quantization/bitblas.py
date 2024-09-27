@@ -122,14 +122,14 @@ class BitBlasConfig(QuantizationConfig):
             print(f"Getting Quant Method for {prefix}")
             print(f"Block Influence layers: {self.block_influence_layers}")
             
+            is_block_influence = any(l + "." in prefix for l in self.block_influence_layers)
+            
             if self.lora_rank is None or any(l in prefix for l in self.skipped_dora_layers):
                 print(f"Using BitBlasLinearMethod for skipped: {prefix}")
-                return BitBlasLinearMethod(self)
-            elif any(l + "." in prefix for l in self.block_influence_layers):
-                print(f"Using BitBlasDORALinearMethod for block influence: {prefix}")
-                return BitBlasDORALinearMethod(self, is_block_influence=True)
+                return BitBlasLinearMethod(self, is_block_influence=is_block_influence)
             else:
-                return BitBlasDORALinearMethod(self)
+                print(f"Using BitBlasDORALinearMethod with block influence: {is_block_influence}")
+                return BitBlasDORALinearMethod(self, is_block_influence=is_block_influence)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -142,10 +142,12 @@ class BitBlasLinearMethod(LinearMethodBase):
         quant_config: The bitblas quantization config.
     """
     
-    def __init__(self, quant_config: BitBlasConfig):
+    def __init__(self, quant_config: BitBlasConfig, is_block_influence=False):
         self.quant_config = quant_config
         self.bitblas_dtype = quant_config.bitblas_dtype
         self.BITBLAS_OPT_M = [1, 16, 32, 64, 128, 256, 512]
+        # self.BITBLAS_OPT_M = [1, 4, 8, 16, 32] + [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]  # optimized for benchmarking
+        self.is_block_influence = is_block_influence
 
     def create_weights(
         self,
@@ -160,7 +162,11 @@ class BitBlasLinearMethod(LinearMethodBase):
     ):
         del output_size  # Unused.
         
-        if isinstance(self.quant_config.nbits, int):
+        if self.is_block_influence:
+            # block influence layers use higher bit precision.
+            self.layer_nbits = 4
+            self.layer_pack_factor = 2
+        elif isinstance(self.quant_config.nbits, int):
             self.layer_nbits = self.quant_config.nbits
             self.layer_pack_factor = self.quant_config.pack_factor
         elif isinstance(self.quant_config.nbits, Dict):
@@ -175,10 +181,13 @@ class BitBlasLinearMethod(LinearMethodBase):
         else:
             raise ValueError(f"Unsupported nbits: {self.quant_config.nbits}")
         
-        if isinstance(self.quant_config.group_size, int):
+        if self.is_block_influence:
+            self.layer_group_size = 128 # FIXME: hardcoded for 4bit now
+        elif isinstance(self.quant_config.group_size, int):
             self.layer_group_size = self.quant_config.group_size
         elif isinstance(self.quant_config.group_size, Dict):
             self.layer_group_size = self.quant_config.group_size[layer_name] 
+        
         
         # if params_dtype != torch.half:
         #     raise ValueError(
@@ -263,14 +272,14 @@ class BitBlasLinearMethod(LinearMethodBase):
         # print(f"output_size_per_partition: {output_size_per_partition}")
         # print(f"input_size_per_partition: {input_size_per_partition}")
         # print(f"Quantized Weight Shape: {qweight.size()}")
-        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit group size {self.layer_group_size} {K}x{N}")
+        logger.info(f"Tuning BitBLAS for {layer_name} with nbits {self.layer_nbits}-bit group size {self.layer_group_size} {K}x{N} dtype {self.bitblas_dtype}")
         self.matmul_config = bitblas.MatmulConfig(M=self.BITBLAS_OPT_M,
                                                     N=N,
                                                     K=K,
                                                     A_dtype="bfloat16" if self.bitblas_dtype == torch.bfloat16 else "float16",
                                                     W_dtype=W_dtype,  
                                                     accum_dtype="float32" if self.bitblas_dtype == torch.bfloat16 else "float16",
-                                                    out_dtype="float16",
+                                                    out_dtype="float16",  
                                                     layout="nt",  
                                                     with_bias=False, 
                                                     group_size=self.layer_group_size,
@@ -323,6 +332,7 @@ class BitBlasDORALinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.bitblas_dtype = quant_config.bitblas_dtype
         self.BITBLAS_OPT_M = [1, 16, 32, 64, 128, 256, 512]
+        # self.BITBLAS_OPT_M = [1, 4, 8, 16, 32] + [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]  # optimized for benchmarking
         self.is_block_influence = is_block_influence
 
     def create_weights(
