@@ -96,14 +96,14 @@ class GemLiteConfig(QuantizationConfig):
             print(f"Getting Quant Method for {prefix}")
             print(f"Block Influence layers: {self.block_influence_layers}")
             
+            is_block_influence = any(l + "." in prefix for l in self.block_influence_layers)
+            
             if self.lora_rank is None or any(l in prefix for l in self.skipped_dora_layers):
                 print(f"Using GemLiteLinearMethod for skipped: {prefix}")
-                return GemLiteLinearMethod(self)
-            elif any(l + "." in prefix for l in self.block_influence_layers):
-                print(f"Using GemLiteDORALinearMethod for block influence: {prefix}")
-                return GemLiteDORALinearMethod(self, is_block_influence=True)
+                return GemLiteLinearMethod(self, is_block_influence=is_block_influence)
             else:
-                return GemLiteDORALinearMethod(self)
+                print(f"Using GemLiteDORALinearMethod with block influence: {is_block_influence}")
+                return GemLiteDORALinearMethod(self, is_block_influence=is_block_influence)                        
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -116,8 +116,9 @@ class GemLiteLinearMethod(LinearMethodBase):
         quant_config: The gemlite quantization config.
     """
     
-    def __init__(self, quant_config: GemLiteConfig):
+    def __init__(self, quant_config: GemLiteConfig, is_block_influence=False):
         self.quant_config = quant_config
+        self.is_block_influence = is_block_influence
 
     def create_weights(
         self,
@@ -132,7 +133,11 @@ class GemLiteLinearMethod(LinearMethodBase):
     ):
         del output_size  # Unused.
         
-        if isinstance(self.quant_config.nbits, int):
+        if self.is_block_influence:
+            # block influence layers use higher bit precision.
+            self.layer_nbits = 4
+            self.layer_pack_factor = self.quant_config.pack_bit // self.layer_nbits
+        elif isinstance(self.quant_config.nbits, int):
             self.layer_nbits = self.quant_config.nbits
             self.layer_pack_factor = self.quant_config.pack_factor
         elif isinstance(self.quant_config.nbits, Dict):
@@ -140,7 +145,9 @@ class GemLiteLinearMethod(LinearMethodBase):
             self.layer_nbits = self.quant_config.nbits[layer_name]            
             self.layer_pack_factor = self.quant_config.pack_factor[layer_name]
         
-        if isinstance(self.quant_config.group_size, int):
+        if self.is_block_influence:
+            self.layer_group_size = 128 # FIXME: hardcoded for 4bit now
+        elif isinstance(self.quant_config.group_size, int):
             self.layer_group_size = self.quant_config.group_size
         elif isinstance(self.quant_config.group_size, Dict):
             self.layer_group_size = self.quant_config.group_size[layer_name] 
@@ -222,7 +229,7 @@ class GemLiteLinearMethod(LinearMethodBase):
         layer.register_parameter("zeros", zeros)
         set_weight_attrs(zeros, extra_weight_attrs)
         
-        
+        # TODO: BF16 support.
         K = input_size_per_partition # this is the dequantized input size
         N = output_size_per_partition # this is the dequantized output size
         self.gemlite_linear = GemLiteLinear(
@@ -451,6 +458,8 @@ class GemLiteDORALinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         
+        # print(f"x.shape: {x.shape}")
+        
         # Init gemlite linear weights.
         if self.gemlite_linear.W_q.device.type == "meta":
             self.gemlite_linear.W_q = layer.qweight
@@ -465,7 +474,6 @@ class GemLiteDORALinearMethod(LinearMethodBase):
         try:
             output = self.gemlite_linear(x)
         except Exception as e:
-            
             print(f"Error in gemlite_linear: {layer}")
             print(f"x.shape: {x.shape}")
             print(f"self.gemlite_linear.W_q.shape: {self.gemlite_linear.W_q.shape}")
