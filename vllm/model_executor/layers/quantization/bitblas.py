@@ -20,8 +20,9 @@ import os
 import bitblas
 from bitblas.cache import global_operator_cache
 from bitblas.module import auto_detect_nvidia_target, BITBLAS_DATABASE_PATH
+from pathlib import Path
 
-BITBLAS_DATABASE_PATH = "/workspace/.cache/bitblas"
+BITBLAS_DATABASE_PATH = os.environ.get("BITBLAS_DATABASE_PATH", str(Path.home() / ".cache" / "bitblas"))
 BITBLAS_TARGET = auto_detect_nvidia_target()
 
 def _get_or_create_bitblas_operator(config):
