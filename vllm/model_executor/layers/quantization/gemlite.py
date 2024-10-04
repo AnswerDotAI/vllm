@@ -255,15 +255,13 @@ class GemLiteLinearMethod(LinearMethodBase):
             self.gemlite_linear.W_q = layer.qweight
             self.gemlite_linear.scales = layer.scales
             self.gemlite_linear.zeros = layer.zeros
-            self.gemlite_linear.bias = None
+            self.gemlite_linear.bias = bias
             print(f"Initialized gemlite linear weights for {layer}")
         
         # x : bs x seq_len x hidden_size
         output = self.gemlite_linear(x)
         
-        if bias is not None:
-            output.add_(bias)  # In-place add
-
+        
         return output
 
 
@@ -300,9 +298,12 @@ class GemLiteDORALinearMethod(LinearMethodBase):
             self.layer_pack_factor = self.quant_config.pack_factor
         elif isinstance(self.quant_config.nbits, Dict):
             # {layer_name: nbits}
-            self.layer_nbits = self.quant_config.nbits[layer_name]            
-            self.layer_pack_factor = self.quant_config.pack_factor[layer_name]
-        
+            try:
+                self.layer_nbits = self.quant_config.nbits[layer_name]            
+                self.layer_pack_factor = self.quant_config.pack_factor[layer_name]
+            except Exception as e:
+                print(f"Error in creating weights for {layer_name}: {e}")
+                raise e
         if self.is_block_influence:
             self.layer_group_size = 128 # FIXME: hardcoded for 4bit now
         elif isinstance(self.quant_config.group_size, int):
@@ -465,7 +466,7 @@ class GemLiteDORALinearMethod(LinearMethodBase):
             self.gemlite_linear.W_q = layer.qweight
             self.gemlite_linear.scales = layer.scales
             self.gemlite_linear.zeros = layer.zeros
-            self.gemlite_linear.bias = None
+            self.gemlite_linear.bias = bias
             print(f"Initialized gemlite linear weights for {layer}")
             
         lora_A, lora_B, rescale = layer.lora_A, layer.lora_B, layer.rescale
@@ -492,7 +493,5 @@ class GemLiteDORALinearMethod(LinearMethodBase):
         # output = rescale.view(1,-1) * (output + x @ lora_A.t() @ lora_B.t()) 
         output = self.dora_layer(x, output, rescale, lora_A, lora_B)
 
-        if bias is not None:
-            output.add_(bias)  # In-place add
 
         return output
