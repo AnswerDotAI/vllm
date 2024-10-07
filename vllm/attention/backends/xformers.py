@@ -450,6 +450,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
+        compute_new_kv: bool = True,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -548,11 +549,26 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory
                 # profiling run.
-                PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                    value_cache,
-                                                    updated_slot_mapping,
-                                                    self.kv_cache_dtype,
-                                                    k_scale, v_scale)
+                if compute_new_kv:
+                    PagedAttention.write_to_paged_cache(key, value, key_cache,
+                                                        value_cache,
+                                                        updated_slot_mapping,
+                                                        self.kv_cache_dtype,
+                                                        k_scale, v_scale)
+                else:
+                    # Use existing KV cache in proceeding layers sharing the cache.
+                    # query: shape = [num_tokens, num_heads * head_size]
+                    # key: shape = [num_tokens, num_kv_heads * head_size]
+                    # value: shape = [num_tokens, num_kv_heads * head_size]
+                    # kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                
+                    # For decoding KV is not needed, KV cache is used instead - so no changes needed.
+                    # For prefill, KV is needed, so we need to extract it from the cache.
+                    # Cached prefill is implemented in PagedAttention.forward_prefix() as a new triton kernel.
+                    # Uses KV from cache, to compute self-attention.
+                    pass
+                    
+
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -619,6 +635,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window,
+                    not compute_new_kv, # KV cache is used for self-attention. Q is unique.
                     k_scale,
                     v_scale,
                 )

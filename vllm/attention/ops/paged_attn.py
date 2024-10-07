@@ -204,6 +204,7 @@ class PagedAttention:
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
         sliding_window: Optional[int],
+        use_kv_cache_for_self_attn: bool,
         k_scale: float,
         v_scale: float,
     ) -> torch.Tensor:
@@ -226,6 +227,7 @@ class PagedAttention:
             v_scale,
             alibi_slopes,
             sliding_window,
+            use_kv_cache_for_self_attn
         )
         return output
 

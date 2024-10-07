@@ -120,6 +120,7 @@ class LlamaAttention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.cache_config = cache_config
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -200,7 +201,8 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        # TODO: kv projections are redundant for layers that share kv cache from previous layers, alternate between qkv_proj and q_proj only based on layer id.
+        qkv, _ = self.qkv_proj(hidden_states) 
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -299,6 +301,7 @@ class LlamaModel(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        self.cache_config = cache_config
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
@@ -351,10 +354,14 @@ class LlamaModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
+            if self.cache_config.kv_cache_map:
+                kv_cache = kv_caches[self.cache_config.kv_cache_map[i]]
+            else:
+                kv_cache = kv_caches[i - self.start_layer]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
+                kv_cache,
                 attn_metadata,
                 residual,
             )
