@@ -537,6 +537,7 @@ class CacheConfig:
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
         kv_cache_map: int = {}, # layer id to physical kv cache index of `kv_cache` list
+        debug_kv_sharing: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -548,6 +549,7 @@ class CacheConfig:
         self.cpu_offload_gb = cpu_offload_gb
         self.kv_cache_map = kv_cache_map
         self.cla_group_size = len(set(kv_cache_map.values())) if kv_cache_map else None
+        self.debug_kv_sharing = debug_kv_sharing
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()

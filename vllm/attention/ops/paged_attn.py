@@ -209,6 +209,8 @@ class PagedAttention:
         v_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
+        # if use_kv_cache_for_self_attn:
+        #     print("Using KV cache for self-attention")
         context_attention_fwd(
             query,
             key,

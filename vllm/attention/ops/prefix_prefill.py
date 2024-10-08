@@ -955,6 +955,8 @@ if triton.__version__ >= "2.1.0":
             return
 
 
+        # FIXME: This implementation is not correct. It's not extract key and value from cache right.
+        # It's also not using block tables correctly.
         if use_kv_cache_for_self_attn:
             _fwd_kernel_kv_cache_self_attention[grid](
                 q,
