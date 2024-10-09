@@ -119,6 +119,12 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
 
+    # Number of query tokens for each request in the batch.
+    # Currently, we require that all requests have the same number of query
+    # tokens during the decoding phase. When speculavie decoding is enabled,
+    # decode_query_len might be greater than 1. In all other cases, it is 1.
+    decode_query_len: Optional[int] = None
+
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -451,7 +457,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         key: Optional[torch.Tensor],
         value: Optional[torch.Tensor],
-        kv_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
         k_scale: float = 1.0,
         v_scale: float = 1.0,
@@ -496,6 +502,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
             attn_type: Select attention type, between encoder attention,
                        decoder self-attention, or encoder/decoder cross-
@@ -529,7 +537,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
 
-        if (attn_type != AttentionType.ENCODER and kv_cache is not None):
+        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
             # KV-cache during decoder-self- or
             # encoder-decoder-cross-attention, but not
             # during encoder attention.
@@ -612,37 +620,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
-                if compute_new_kv:
-                    # print("Prefilling")
-                    # print(prefill_meta.block_tables.shape, kv_cache.shape if kv_cache is not None else 'None')
-                    # print(prefill_meta.block_tables)
-                    # normal attention.
-                    # block tables are empty if the prompt does not have a cached
-                    # prefix.
-                    prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_NEW.name)
-                elif kv_cache is not None:
-                    # print("Prefilling with KV cache")
-                    # Split kv_cache into key_cache and value_cache.
-                    key_cache, value_cache = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-                    block_size = value_cache.size(-1)
-                    
-                    # Extract KV from cache using slot_mapping.
-                    k_reshaped, v_reshaped = convert_cache_to_original_shape(key_cache, value_cache, self.num_kv_heads, self.head_size)
-                    slot_mapping = prefill_meta.slot_mapping
-                    block_idxs, token_idxs = slot_mapping // block_size, slot_mapping % block_size
-                    key, value = k_reshaped[block_idxs, token_idxs], v_reshaped[block_idxs, token_idxs]
-                    if "fp8" in self.kv_cache_dtype:
-                        # FIXME: Tests are failing.
-                        key, value = convert_kv_cache_from_fp8_to_float(key, value, k_scale, v_scale)
-                        key, value = key.to(query.dtype), value.to(query.dtype)
-                    
-                    prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_SHARED.name)
-                else:
-                    # print("Profiling")
-                    prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PROFILING.name)
-
-                out = self._run_memory_efficient_xformers_forward(query, key, value, prefill_meta, attn_type=attn_type)
+            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
+                # normal attention.
+                # block tables are empty if the prompt does not have a cached
+                # prefix.
+                out = self._run_memory_efficient_xformers_forward(
+                    query, key, value, prefill_meta, attn_type=attn_type)
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
