@@ -10,7 +10,8 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
                                          LowerTriangularMaskWithTensorBias)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType, 
+                                              SharedSelfAttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
@@ -20,23 +21,23 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class XFormersBackend(AttentionBackend):
+class XFormersCLABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
         return "xformers"
 
     @staticmethod
-    def get_impl_cls() -> Type["XFormersImpl"]:
-        return XFormersImpl
+    def get_impl_cls() -> Type["XFormersCLAImpl"]:
+        return XFormersCLAImpl
 
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return XFormersMetadata
+        return XFormersCLAMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["XFormersMetadataBuilder"]:
-        return XFormersMetadataBuilder
+    def get_builder_cls() -> Type["XFormersCLAMetadataBuilder"]:
+        return XFormersCLAMetadataBuilder
 
     @staticmethod
     def get_state_cls() -> Type["CommonAttentionState"]:
@@ -69,8 +70,8 @@ class XFormersBackend(AttentionBackend):
 
 
 @dataclass
-class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
-    """Metadata for XFormersbackend.
+class XFormersCLAMetadata(AttentionMetadata, PagedAttentionMetadata):
+    """Metadata for XFormersCLA backend.
 
     NOTE: Any python object stored here is not updated when it is
     cuda-graph replayed. If you have values that need to be changed
@@ -130,8 +131,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     query_start_loc: Optional[torch.Tensor] = None
 
     # Self-attention prefill/decode metadata cache
-    _cached_prefill_metadata: Optional["XFormersMetadata"] = None
-    _cached_decode_metadata: Optional["XFormersMetadata"] = None
+    _cached_prefill_metadata: Optional["XFormersCLAMetadata"] = None
+    _cached_decode_metadata: Optional["XFormersCLAMetadata"] = None
 
     # Begin encoder attn & enc/dec cross-attn fields...
 
@@ -149,6 +150,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # and block tables
     cross_slot_mapping: Optional[torch.Tensor] = None
     cross_block_tables: Optional[torch.Tensor] = None
+    
+    # Debug Shared KV Cache (Cross Layer Attention)
+    shared_self_attention_types: Optional[List[SharedSelfAttentionType]] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -181,7 +185,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 and (self.cross_block_tables is not None))
 
     @property
-    def prefill_metadata(self) -> Optional["XFormersMetadata"]:
+    def prefill_metadata(self) -> Optional["XFormersCLAMetadata"]:
         if self.num_prefills == 0:
             return None
 
@@ -210,7 +214,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                         self.block_tables[:self.num_prefills])
 
         # Construct & cache prefill-phase attention metadata structure
-        self._cached_prefill_metadata = XFormersMetadata(
+        self._cached_prefill_metadata = XFormersCLAMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
@@ -230,10 +234,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
             cross_block_tables=self.cross_block_tables)
+        self._cached_prefill_metadata.shared_self_attention_types = []
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["XFormersMetadata"]:
+    def decode_metadata(self) -> Optional["XFormersCLAMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
@@ -253,7 +258,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                         self.block_tables[self.num_prefills:])
 
         # Construct & cache decode-phase attention metadata structure
-        self._cached_decode_metadata = XFormersMetadata(
+        self._cached_decode_metadata = XFormersCLAMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
@@ -269,11 +274,12 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
             cross_block_tables=self.cross_block_tables)
+        self._cached_decode_metadata.shared_self_attention_types = []
         return self._cached_decode_metadata
 
 
 def _get_attn_bias(
-    attn_metadata: XFormersMetadata,
+    attn_metadata: XFormersCLAMetadata,
     attn_type: AttentionType,
 ) -> Optional[AttentionBias]:
     '''
@@ -300,7 +306,7 @@ def _get_attn_bias(
 
 
 def _set_attn_bias(
-    attn_metadata: XFormersMetadata,
+    attn_metadata: XFormersCLAMetadata,
     attn_bias: List[Optional[AttentionBias]],
     attn_type: AttentionType,
 ) -> None:
@@ -327,7 +333,7 @@ def _set_attn_bias(
 
 
 def _get_seq_len_block_table_args(
-    attn_metadata: XFormersMetadata,
+    attn_metadata: XFormersCLAMetadata,
     is_prompt: bool,
     attn_type: AttentionType,
 ) -> tuple:
@@ -378,12 +384,12 @@ def _get_seq_len_block_table_args(
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
-class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
+class XFormersCLAMetadataBuilder(CommonMetadataBuilder[XFormersCLAMetadata]):
 
-    _metadata_cls = XFormersMetadata
+    _metadata_cls = XFormersCLAMetadata
 
 
-class XFormersImpl(AttentionImpl[XFormersMetadata]):
+class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prefill_tokens ----------------->|	
@@ -423,10 +429,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
-                "XFormers does not support block-sparse attention.")
+                "XFormersCLA does not support block-sparse attention.")
         if logits_soft_cap is not None:
             raise ValueError(
-                "XFormers does not support attention logits soft capping.")
+                "XFormersCLA does not support attention logits soft capping.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -452,10 +458,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         key: Optional[torch.Tensor],
         value: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
-        attn_metadata: "XFormersMetadata",
+        attn_metadata: "XFormersCLAMetadata",
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
+        compute_new_kv: bool = True,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -556,11 +563,28 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory
                 # profiling run.
-                PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                    value_cache,
-                                                    updated_slot_mapping,
-                                                    self.kv_cache_dtype,
-                                                    k_scale, v_scale)
+                if compute_new_kv:
+                    PagedAttention.write_to_paged_cache(key, value, key_cache,
+                                                        value_cache,
+                                                        updated_slot_mapping,
+                                                        self.kv_cache_dtype,
+                                                        k_scale, v_scale)
+                    # print("Writing to KV cache")
+                    # print(f"updated_slot_mapping: {updated_slot_mapping}")
+                    # print(f"key.shape:{key.shape}, value.shape: {value.shape}")
+                else:
+                    # Use existing KV cache in proceeding layers sharing the cache.
+                    # query: shape = [num_tokens, num_heads * head_size]
+                    # key: shape = [num_tokens, num_kv_heads * head_size]
+                    # value: shape = [num_tokens, num_kv_heads * head_size]
+                    # kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                
+                    # For decoding KV is not needed, KV cache is used instead - so no changes needed.
+                    # For prefill, KV is needed, so we need to extract it from the cache.
+                    # Cached prefill is implemented in PagedAttention.forward_prefix() as a new triton kernel.
+                    # Uses KV from cache, to compute self-attention.
+                    # print("Re-using KV cache")                    
+                    pass
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -597,15 +621,43 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
-                # normal attention.
-                # block tables are empty if the prompt does not have a cached
-                # prefix.
-                out = self._run_memory_efficient_xformers_forward(
-                    query, key, value, prefill_meta, attn_type=attn_type)
+                if compute_new_kv:
+                    # print("Prefilling")
+                    # print(prefill_meta.block_tables.shape, kv_cache.shape if kv_cache is not None else 'None')
+                    # print(prefill_meta.block_tables)
+                    # normal attention.
+                    # block tables are empty if the prompt does not have a cached
+                    # prefix.
+                    prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_NEW.name)
+                elif kv_cache.numel() != 0:
+                    # print("Prefilling with KV cache")
+                    # Split kv_cache into key_cache and value_cache.
+                    key_cache, value_cache = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
+                    block_size = value_cache.size(-1)
+                    
+                    # Extract KV from cache using slot_mapping.
+                    k_reshaped, v_reshaped = convert_cache_to_original_shape(key_cache, value_cache, self.num_kv_heads, self.head_size)
+                    slot_mapping = prefill_meta.slot_mapping
+                    block_idxs, token_idxs = slot_mapping // block_size, slot_mapping % block_size
+                    key, value = k_reshaped[block_idxs, token_idxs], v_reshaped[block_idxs, token_idxs]
+                    if "fp8" in self.kv_cache_dtype:
+                        # FIXME: Tests are failing.
+                        key, value = convert_kv_cache_from_fp8_to_float(key, value, k_scale, v_scale)
+                        key, value = key.to(query.dtype), value.to(query.dtype)
+                    
+                    prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_SHARED.name)
+                else:
+                    # print("Profiling")
+                    prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PROFILING.name)
+
+                out = self._run_memory_efficient_xformers_forward(query, key, value, prefill_meta, attn_type=attn_type)
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
-
+                # TODO: Test this KV Cache Sharing. 
+                # print("Prefilling with KV cache (prefix-cache enabled)")
+                # print(prefill_meta.block_tables.shape, kv_cache.shape if kv_cache is not None else 'None')
+                # print(prefill_meta.block_tables)
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
 
@@ -627,14 +679,16 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window,
+                    not compute_new_kv, # KV cache is used for self-attention. Q is unique.
                     k_scale,
                     v_scale,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
+                prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PREFIX_CACHED_KV.name)
 
         if decode_meta := attn_metadata.decode_metadata:
-
+            # print("Decoding")
             (
                 seq_lens_arg,
                 max_seq_len_arg,
@@ -655,6 +709,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 k_scale,
                 v_scale,
             )
+            if compute_new_kv:
+                decode_meta.shared_self_attention_types.append(SharedSelfAttentionType.DECODE_KV_NEW.name)
+            else:
+                decode_meta.shared_self_attention_types.append(SharedSelfAttentionType.DECODE_KV_SHARED.name)
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
@@ -664,7 +722,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: XFormersMetadata,
+        attn_metadata: XFormersCLAMetadata,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Attention for 1D query of multiple prompts. Multiple prompt
@@ -809,3 +867,53 @@ def _make_alibi_bias(
         attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
 
     return attn_biases
+
+
+def convert_cache_to_original_shape(k_cache, v_cache, num_kv_heads, head_size):
+    """
+    Convert k_cache and v_cache from 5D and 4D shapes back to 
+    (num_blocks, block_size, num_kv_heads, head_size)
+    
+    Args:
+    k_cache (torch.Tensor): Key cache of shape [num_blocks, num_heads, head_size/x, block_size, x]
+    v_cache (torch.Tensor): Value cache of shape [num_blocks, num_heads, head_size, block_size]
+    num_kv_heads (int): Number of key/value heads
+    head_size (int): Size of each head
+    
+    Returns:
+    tuple: (k_standard, v_standard) - Reshaped key and value caches
+    """
+    num_blocks, _, _, block_size, x = k_cache.shape
+    
+    # Reshape key cache
+    k_standard = k_cache.permute(0, 3, 1, 2, 4)
+    k_standard = k_standard.reshape(num_blocks, block_size, num_kv_heads, head_size)
+    
+    # Reshape value cache
+    v_standard = v_cache.permute(0, 3, 1, 2)
+    v_standard = v_standard.reshape(num_blocks, block_size, num_kv_heads, head_size)
+    
+    return k_standard, v_standard
+
+def fp8_e4m3_to_float(fp8):
+    """
+    Convert FP8 E4M3 format to float32.
+    """
+    # Constants for E4M3
+    exp_bias = 7
+
+    # Unpack from 8 bits
+    sign = ((fp8 & 0x80) != 0).float() * -2 + 1
+    exp = ((fp8 & 0x78) >> 3).float() - exp_bias
+    mantissa = (fp8 & 0x7).float() / 8 + 1
+
+    # Reconstruct float
+    return sign * mantissa * (2.0 ** exp)
+
+def convert_kv_cache_from_fp8_to_float(key_fp8, value_fp8, k_scale, v_scale):
+    """
+    Convert key and value tensors from FP8 E4M3 format to float.
+    """
+    key_float = fp8_e4m3_to_float(key_fp8) * k_scale
+    value_float = fp8_e4m3_to_float(value_fp8) * v_scale
+    return key_float, value_float
