@@ -640,10 +640,12 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                     slot_mapping = prefill_meta.slot_mapping
                     block_idxs, token_idxs = slot_mapping // block_size, slot_mapping % block_size
                     key, value = k_reshaped[block_idxs, token_idxs], v_reshaped[block_idxs, token_idxs]
-                    if "fp8" in self.kv_cache_dtype:
-                        # FIXME: Tests are failing.
-                        key, value = convert_kv_cache_from_fp8_to_float(key, value, k_scale, v_scale)
-                        key, value = key.to(query.dtype), value.to(query.dtype)
+                    if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+                        key = (key.view(torch.float8_e4m3fn).to(torch.float32) * k_scale).to(query.dtype)
+                        value = (value.view(torch.float8_e4m3fn).to(torch.float32) * v_scale).to(query.dtype)
+                    elif self.kv_cache_dtype == "fp8_e5m2":
+                        key = (key.view(torch.float8_e5m2).to(torch.float32) * k_scale).to(query.dtype)
+                        value = (value.view(torch.float8_e5m2).to(torch.float32) * v_scale).to(query.dtype)
                     
                     prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_SHARED.name)
                 else:
@@ -894,26 +896,3 @@ def convert_cache_to_original_shape(k_cache, v_cache, num_kv_heads, head_size):
     v_standard = v_standard.reshape(num_blocks, block_size, num_kv_heads, head_size)
     
     return k_standard, v_standard
-
-def fp8_e4m3_to_float(fp8):
-    """
-    Convert FP8 E4M3 format to float32.
-    """
-    # Constants for E4M3
-    exp_bias = 7
-
-    # Unpack from 8 bits
-    sign = ((fp8 & 0x80) != 0).float() * -2 + 1
-    exp = ((fp8 & 0x78) >> 3).float() - exp_bias
-    mantissa = (fp8 & 0x7).float() / 8 + 1
-
-    # Reconstruct float
-    return sign * mantissa * (2.0 ** exp)
-
-def convert_kv_cache_from_fp8_to_float(key_fp8, value_fp8, k_scale, v_scale):
-    """
-    Convert key and value tensors from FP8 E4M3 format to float.
-    """
-    key_float = fp8_e4m3_to_float(key_fp8) * k_scale
-    value_float = fp8_e4m3_to_float(value_fp8) * v_scale
-    return key_float, value_float
