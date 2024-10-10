@@ -18,6 +18,13 @@ class AttentionType(Enum):
     ENCODER = auto()  # Encoder attention between previous layer Q/K/V
     ENCODER_DECODER = auto()  # Attention between dec. Q and enc. K/V
 
+class SharedSelfAttentionType(Enum):
+    PREFILL_KV_NEW = auto()  # Prefill with new KV cache
+    PREFILL_KV_SHARED = auto()  # Prefill with shared KV cache
+    PREFILL_PROFILING = auto()  # Prefill profiling
+    PREFILL_PREFIX_CACHED_KV = auto()  # Prefill with prefix cached KV cache
+    DECODE_KV_NEW = auto()  # Decode with new KV cache
+    DECODE_KV_SHARED = auto()  # Decode with shared KV cache
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""

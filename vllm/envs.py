@@ -275,6 +275,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - "TORCH_SDPA": use torch.nn.MultiheadAttention
     # - "FLASH_ATTN": use FlashAttention
     # - "XFORMERS": use XFormers
+    # - "XFORMERS_CLA": use XFormers CLA
     # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
     "VLLM_ATTENTION_BACKEND":

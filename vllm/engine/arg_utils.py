@@ -110,6 +110,8 @@ class EngineArgs:
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
+    kv_cache_map: Optional[Dict[int, int]] = None # layer id to physical kv cache index of `kv_cache` list
+    debug_kv_sharing: bool = False
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -914,6 +916,8 @@ class EngineArgs:
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
+            kv_cache_map=self.kv_cache_map,
+            debug_kv_sharing=self.debug_kv_sharing,
         )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
