@@ -253,150 +253,7 @@ if triton.__version__ >= "2.1.0":
                  (offs_m[:, None] < cur_batch_query_len))
         return
 
-    @triton.jit
-    def _fwd_kernel_kv_cache_self_attention(
-        Q, 
-        K_cache, 
-        V_cache, 
-        B_Loc, 
-        sm_scale, 
-        k_scale, 
-        v_scale,
-        B_Start_Loc, 
-        B_Seqlen, 
-        block_size, 
-        x, 
-        Out,
-        stride_b_loc_b, 
-        stride_b_loc_s, 
-        stride_qbs, 
-        stride_qh, 
-        stride_qd,
-        stride_obs, 
-        stride_oh, 
-        stride_od, 
-        stride_k_cache_bs, 
-        stride_k_cache_h,
-        stride_k_cache_d, 
-        stride_k_cache_bl, 
-        stride_k_cache_x, 
-        stride_v_cache_bs,
-        stride_v_cache_h, 
-        stride_v_cache_d, 
-        stride_v_cache_bl,
-        num_queries_per_kv: int,
-        BLOCK_M: tl.constexpr, 
-        BLOCK_DMODEL: tl.constexpr,
-        BLOCK_DMODEL_PADDED: tl.constexpr, 
-        BLOCK_N: tl.constexpr,
-        SLIDING_WINDOW: tl.constexpr
-    ):
-        cur_batch = tl.program_id(0)
-        cur_head = tl.program_id(1)
-        start_m = tl.program_id(2)
 
-        cur_kv_head = cur_head // num_queries_per_kv
-
-        cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
-        cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
-
-        block_start_loc = BLOCK_M * start_m
-
-        offs_n = tl.arange(0, BLOCK_N)
-        offs_d = tl.arange(0, BLOCK_DMODEL_PADDED)
-        offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        off_q = (
-            (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs +
-            cur_head * stride_qh + offs_d[None, :] * stride_qd)
-
-        dim_mask = tl.where(
-            tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1,
-            0).to(tl.int1)
-
-        q = tl.load(Q + off_q,
-                    mask=dim_mask[None, :] &
-                    (offs_m[:, None] < cur_batch_seq_len),
-                    other=0.0)
-
-        m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
-        l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-        acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)
-
-        block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
-
-        for start_n in range(0, block_mask * (start_m + 1) * BLOCK_M, BLOCK_N):
-            start_n = tl.multiple_of(start_n, BLOCK_N)
-            
-            off_k = (
-                (cur_batch_in_all_start_index + start_n + offs_n[None, :]) * stride_k_cache_bs +
-                cur_kv_head * stride_k_cache_h +
-                (offs_d[:, None] // x) * stride_k_cache_d +
-                ((start_n + offs_n[None, :]) % block_size) * stride_k_cache_bl +
-                (offs_d[:, None] % x) * stride_k_cache_x
-            )
-            off_v = (
-                (cur_batch_in_all_start_index + start_n + offs_n[:, None]) * stride_v_cache_bs +
-                cur_kv_head * stride_v_cache_h +
-                offs_d[None, :] * stride_v_cache_d +
-                (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl
-            )
-            
-            k_load = tl.load(K_cache + off_k,
-                        mask=dim_mask[:, None] &
-                        ((start_n + offs_n[None, :]) < cur_batch_seq_len),
-                        other=0.0)
-            v_load = tl.load(V_cache + off_v,
-                        mask=dim_mask[None, :] &
-                        ((start_n + offs_n[:, None]) < cur_batch_seq_len),
-                        other=0.0)
-
-            if k_load.dtype.is_fp8():
-                k = (k_load.to(tl.float32) * k_scale).to(q.dtype)
-            else:
-                k = k_load
-
-            if v_load.dtype.is_fp8():
-                v = (v_load.to(tl.float32) * v_scale).to(q.dtype)
-            else:
-                v = v_load
-
-            qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk += tl.dot(q, k)
-            qk *= sm_scale
-            qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk,
-                        float("-inf"))
-            if SLIDING_WINDOW > 0:
-                qk = tl.where(
-                    offs_m[:, None] -
-                    (start_n + offs_n[None, :]) < SLIDING_WINDOW, qk, -10000)
-
-            m_ij = tl.max(qk, 1)
-            p = tl.exp(qk - m_ij[:, None])
-            l_ij = tl.sum(p, 1)
-            m_i_new = tl.maximum(m_i, m_ij)
-            alpha = tl.exp(m_i - m_i_new)
-            beta = tl.exp(m_ij - m_i_new)
-            l_i_new = alpha * l_i + beta * l_ij
-            p_scale = beta / l_i_new
-            p = p * p_scale[:, None]
-            acc_scale = l_i / l_i_new * alpha
-            acc = acc * acc_scale[:, None]
-            p = p.to(v.dtype)
-
-            acc += tl.dot(p, v)
-            l_i = l_i_new
-            m_i = m_i_new
-
-        off_o = (
-            (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs +
-            cur_head * stride_oh + offs_d[None, :] * stride_od)
-        out_ptrs = Out + off_o
-        tl.store(out_ptrs,
-                acc,
-                mask=dim_mask[None, :] &
-                (offs_m[:, None] < cur_batch_seq_len))
-        return
-    
     @triton.jit
     def _fwd_kernel_flash_attn_v2(
         Q,
@@ -851,8 +708,7 @@ if triton.__version__ >= "2.1.0":
                               k_scale: float = 1.0,
                               v_scale: float = 1.0,
                               alibi_slopes=None,
-                              sliding_window=None, 
-                              use_kv_cache_for_self_attn=False):
+                              sliding_window=None):
 
         BLOCK = 128 if current_platform.has_device_capability(80) else 64
         NUM_WARPS = 8
@@ -953,52 +809,6 @@ if triton.__version__ >= "2.1.0":
             )
             return
 
-
-        # FIXME: This implementation is not correct. It's not extract key and value from cache right.
-        # It's also not using block tables correctly.
-        if use_kv_cache_for_self_attn:
-            _fwd_kernel_kv_cache_self_attention[grid](
-                q,
-                k_cache,
-                v_cache,
-                b_loc,
-                sm_scale,
-                k_scale,
-                v_scale,
-                b_start_loc,
-                b_seq_len,
-                v_cache.shape[3],
-                k_cache.shape[4],
-                o,
-                b_loc.stride(0),
-                b_loc.stride(1),
-                q.stride(0),
-                q.stride(1),
-                q.stride(2),
-                o.stride(0),
-                o.stride(1),
-                o.stride(2),
-                k_cache.stride(0),
-                k_cache.stride(1),
-                k_cache.stride(2),
-                k_cache.stride(3),
-                k_cache.stride(4),
-                v_cache.stride(0),
-                v_cache.stride(1),
-                v_cache.stride(2),
-                v_cache.stride(3),
-                num_queries_per_kv=num_queries_per_kv,
-                BLOCK_M=BLOCK,
-                BLOCK_DMODEL=Lk,
-                BLOCK_DMODEL_PADDED=Lk_padded,
-                BLOCK_N=BLOCK,
-                SLIDING_WINDOW=sliding_window,
-                num_warps=NUM_WARPS,
-                num_stages=1,
-            )
-            return
-            
-            
             
         _fwd_kernel[grid](
             q,

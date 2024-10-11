@@ -10,7 +10,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-
+from vllm.attention.backends.xformers_cla import XFormersCLAImpl
 
 class Attention(nn.Module):
     """Attention layer.
@@ -96,15 +96,25 @@ class Attention(nn.Module):
         compute_new_kv: bool = True,
     ) -> torch.Tensor:
 
-        return self.impl.forward(query,
-                                 key,
-                                 value,
-                                 kv_cache,
-                                 attn_metadata,
-                                 self._k_scale,
-                                 self._v_scale,
-                                 attn_type=attn_type,
-                                 compute_new_kv=compute_new_kv)
+        if isinstance(self.impl, XFormersCLAImpl):
+            return self.impl.forward(query,
+                                    key,
+                                    value,
+                                    kv_cache,
+                                    attn_metadata,
+                                    self._k_scale,
+                                    self._v_scale,
+                                    attn_type=attn_type,
+                                    compute_new_kv=compute_new_kv)
+        else:
+            return self.impl.forward(query,
+                                    key,
+                                    value,
+                                    kv_cache,
+                                    attn_metadata,
+                                    self._k_scale,
+                                    self._v_scale,
+                                    attn_type=attn_type)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

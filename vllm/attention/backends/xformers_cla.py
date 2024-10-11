@@ -629,7 +629,7 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                     # block tables are empty if the prompt does not have a cached
                     # prefix.
                     prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_NEW.name)
-                elif kv_cache.numel() != 0:
+                elif kv_cache.numel() > 0:
                     # print("Prefilling with KV cache")
                     # Split kv_cache into key_cache and value_cache.
                     key_cache, value_cache = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
@@ -662,11 +662,29 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                 # print(prefill_meta.block_tables)
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
+                
+                if kv_cache.numel() > 0 and not compute_new_kv:
+                    # Split kv_cache into key_cache and value_cache.
+                    key_cache, value_cache = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
+                    block_size = value_cache.size(-1)
+                    
+                    # Extract KV from cache using slot_mapping.
+                    k_reshaped, v_reshaped = convert_cache_to_original_shape(key_cache, value_cache, self.num_kv_heads, self.head_size)
+                    slot_mapping = prefill_meta.slot_mapping
+                    block_idxs, token_idxs = slot_mapping // block_size, slot_mapping % block_size
+                    key, value = k_reshaped[block_idxs, token_idxs], v_reshaped[block_idxs, token_idxs]
+                    if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+                        key = (key.view(torch.float8_e4m3fn).to(torch.float32) * k_scale).to(query.dtype)
+                        value = (value.view(torch.float8_e4m3fn).to(torch.float32) * v_scale).to(query.dtype)
+                    elif self.kv_cache_dtype == "fp8_e5m2":
+                        key = (key.view(torch.float8_e5m2).to(torch.float32) * k_scale).to(query.dtype)
+                        value = (value.view(torch.float8_e5m2).to(torch.float32) * v_scale).to(query.dtype)
 
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
                 # deal with different data types between KV and FP8 KV cache,
                 # to be addressed separately.
+                # print(f"query.shape: {query.shape}, key.shape: {key.shape}, value.shape: {value.shape}")
                 out = PagedAttention.forward_prefix(
                     query,
                     key,
@@ -681,14 +699,18 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window,
-                    not compute_new_kv, # KV cache is used for self-attention. Q is unique.
                     k_scale,
                     v_scale,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
-                prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PREFIX_CACHED_KV.name)
-
+                
+                if compute_new_kv:
+                    prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PREFIX_CACHED_KV.name)
+                else:
+                    prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PREFIX_CACHED_KV_SHARED.name)
+                
+                
         if decode_meta := attn_metadata.decode_metadata:
             # print("Decoding")
             (

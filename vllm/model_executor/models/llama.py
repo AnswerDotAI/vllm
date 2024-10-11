@@ -201,7 +201,7 @@ class LlamaAttention(nn.Module):
         
         # compute_new_kv when value changes
         layer_id = int(self.prefix.split(".")[2])
-        compute_new_kv_map = self.cache_config.compute_new_kv_map[layer_id]
+        compute_new_kv_map = self.cache_config.compute_new_kv_map.get(layer_id, True)
         # print(f"compute_new_kv_map: {compute_new_kv_map} at layer {layer_id}")
         # print(f"q: {q.shape}, k: {k.shape}, v: {v.shape}, kv_cache: {kv_cache.shape if kv_cache is not None else 'None'}")
         
@@ -291,10 +291,11 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
-def compute_new_kv_map(kv_map):
+def compute_new_kv_map(kv_cache_map) -> dict[int, bool]:
+    if kv_cache_map is None: return {}
     prev_id = None
     comput_new_kv_map = {}
-    for k,v in kv_map.items():
+    for k,v in kv_cache_map.items():
         if prev_id is None or v != prev_id:
             comput_new_kv_map[k] = True
         else:
