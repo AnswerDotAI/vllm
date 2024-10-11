@@ -13,9 +13,11 @@ from typing import Tuple
 
 import pytest
 import torch
+import time
 
 from tests.kernels.utils import override_backend_env_variable
 from vllm.utils import Device
+from vllm.sampling_params import SamplingParams
 from vllm.attention.backends.abstract import SharedSelfAttentionType
 
 
@@ -73,9 +75,7 @@ def test_prefill(
     enforce_eager: bool,
 ) -> None:
     """
-    Test the case when some sequences have the prefix cache hit
-    and the others don't. The cached position determines where 
-    the sequence is at among the batch of prefills.
+    Test prefill with KV cache sharing.
     """
     override_backend_env_variable(monkeypatch, backend)
 
@@ -168,9 +168,7 @@ def test_prefill_and_decode(
     enforce_eager: bool,
 ) -> None:
     """
-    Test the case when some sequences have the prefix cache hit
-    and the others don't. The cached position determines where 
-    the sequence is at among the batch of prefills.
+    Test prefill and decode with KV cache sharing.
     """
     override_backend_env_variable(monkeypatch, backend)
 
@@ -268,3 +266,93 @@ def test_prefill_and_decode(
                 assert meta.decode_metadata.shared_self_attention_types == expected
             
         assert vllm_outputs_text1 == vllm_outputs_text2
+        
+
+@pytest.mark.parametrize("model_and_tokenizer", MODEL_AND_TOKENIZER)
+@pytest.mark.parametrize("backend", ["XFORMERS_CLA"])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("use_v2_block_manager", [True], ids=["v2_block_manager"])
+@pytest.mark.parametrize("enable_prefix_caching", [False], ids=["no_prefix_caching"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"], ids=["kv_cache_auto", "kv_cache_fp8"])
+@pytest.mark.parametrize("enforce_eager", [False, True], ids=["cuda_graph", "eager"])
+def test_throughput(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model_and_tokenizer: Tuple[str, str],
+    backend: str,
+    dtype: str,
+    use_v2_block_manager: bool,
+    monkeypatch,
+    enable_prefix_caching: bool,
+    kv_cache_dtype: str,
+    enforce_eager: bool,
+) -> None:
+    """
+    Test if KV cache sharing implementation harms the throughput.
+    """
+    override_backend_env_variable(monkeypatch, backend)
+
+    model_name, tokenizer_name = model_and_tokenizer
+   
+    def _benchmark_speed(vllm_model, example_prompts):
+        # warmup.
+        _ = vllm_model.model.generate([example_prompts[0]], sampling_params=SamplingParams(temperature=0.0, max_tokens=1))
+    
+        # Time-to-first-token (TTFT).
+        start = time.time()
+        _ = vllm_model.model.generate(example_prompts, sampling_params=SamplingParams(temperature=0.0, max_tokens=1))
+        ttft = time.time() - start
+        
+        # Completion time,
+        start = time.time()
+        outputs = vllm_model.model.generate(example_prompts, sampling_params=SamplingParams(temperature=0.0, max_tokens=32))
+        completion_time = time.time() - start
+        
+        # total input tokens
+        total_input_tokens = sum([len(o.prompt_token_ids) for o in outputs])
+        total_output_tokens = sum([len(o.outputs[0].token_ids) for o in outputs])
+        
+        prefill_tput = total_input_tokens / ttft
+        decode_tput = total_output_tokens / (completion_time - ttft)
+        return prefill_tput, decode_tput
+        
+
+    # Base.
+    with vllm_runner(
+            model_name,
+            tokenizer_name=tokenizer_name,
+            dtype=dtype,
+            enable_prefix_caching=enable_prefix_caching,
+            use_v2_block_manager=use_v2_block_manager,
+            kv_cache_dtype=kv_cache_dtype,
+            enforce_eager=enforce_eager,
+            kv_cache_map=None, # layer 0 shares kv cache with layer 1
+            debug_kv_sharing=False, # set q hidden states to 1.0 and store states/metadata.
+            gpu_memory_utilization=0.2
+    ) as vllm_model:
+        base_prefill_tput, base_decode_tput = _benchmark_speed(vllm_model, example_prompts)
+           
+    # Test: KV Cache Sharing.
+    with vllm_runner(
+            model_name,
+            tokenizer_name=tokenizer_name,
+            dtype=dtype,
+            enable_prefix_caching=enable_prefix_caching,
+            use_v2_block_manager=use_v2_block_manager,
+            kv_cache_dtype=kv_cache_dtype,
+            enforce_eager=enforce_eager,
+            kv_cache_map={0:0, 1:0}, # layer 0 shares kv cache with layer 1
+            debug_kv_sharing=False, # set q hidden states to 1.0 and store states/metadata.
+            gpu_memory_utilization=0.2
+    ) as vllm_model:
+
+        test_prefill_tput, test_decode_tput = _benchmark_speed(vllm_model, example_prompts)
+    
+       
+    assert test_prefill_tput > base_prefill_tput, f"Prefill throughput is degraded by {((base_prefill_tput - test_prefill_tput) / base_prefill_tput) * 100:.2f}%: {test_prefill_tput:.2f} vs {base_prefill_tput:.2f}"
+    assert test_decode_tput > base_decode_tput, f"Decode throughput is degraded by {((base_decode_tput - test_decode_tput) / base_decode_tput) * 100:.2f}%: {test_decode_tput:.2f} vs {base_decode_tput:.2f}"
+        
+        
+        
+        

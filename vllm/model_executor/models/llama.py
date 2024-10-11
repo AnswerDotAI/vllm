@@ -146,16 +146,31 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size=hidden_size,
-            head_size=self.head_dim,
-            total_num_heads=self.total_num_heads,
-            total_num_kv_heads=self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-            layer_name="qkv_proj",
-            prefix=f"{prefix}.qkv_proj",
-        )
+        layer_id = int(self.prefix.split(".")[2])
+        compute_new_kv_map = self.cache_config.compute_new_kv_map.get(layer_id, True)
+        if compute_new_kv_map:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size=hidden_size,
+                head_size=self.head_dim,
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                bias=bias,
+                quant_config=quant_config,
+                layer_name="qkv_proj",
+                prefix=f"{prefix}.qkv_proj",
+            )
+        else:
+            # TODO: Implement q_proj.
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size=hidden_size,
+                head_size=self.head_dim,
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                bias=bias,
+                quant_config=quant_config,
+                layer_name="qkv_proj",
+                prefix=f"{prefix}.qkv_proj",
+            )            
 
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
