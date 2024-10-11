@@ -54,6 +54,7 @@ MODEL_AND_TOKENIZER = [
     ("answerdotai/vllm-tests-kv-cache-sharing-2layers-llama", "meta-llama/Meta-Llama-3.1-8B-Instruct"),
  ]
 
+
 @pytest.mark.parametrize("model_and_tokenizer", MODEL_AND_TOKENIZER)
 @pytest.mark.parametrize("backend", ["XFORMERS_CLA"])
 @pytest.mark.parametrize("dtype", ["half"])
@@ -276,7 +277,6 @@ def test_prefill_and_decode(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"], ids=["kv_cache_auto", "kv_cache_fp8"])
 @pytest.mark.parametrize("enforce_eager", [False, True], ids=["cuda_graph", "eager"])
 def test_throughput(
-    hf_runner,
     vllm_runner,
     example_prompts,
     model_and_tokenizer: Tuple[str, str],
@@ -354,5 +354,66 @@ def test_throughput(
     assert test_decode_tput > base_decode_tput, f"Decode throughput is degraded by {((base_decode_tput - test_decode_tput) / base_decode_tput) * 100:.2f}%: {test_decode_tput:.2f} vs {base_decode_tput:.2f}"
         
         
+@pytest.mark.parametrize("model_and_tokenizer", MODEL_AND_TOKENIZER)
+@pytest.mark.parametrize("backend", ["XFORMERS_CLA"])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("use_v2_block_manager", [False, True], ids=["v1_block_manager", "v2_block_manager"])
+@pytest.mark.parametrize("enable_prefix_caching", [False, True], ids=["no_prefix_caching", "prefix_caching"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"], ids=["kv_cache_auto", "kv_cache_fp8"])
+@pytest.mark.parametrize("enforce_eager", [False, True], ids=["cuda_graph", "eager"])
+def test_kv_cache_allocation(
+    vllm_runner,
+    model_and_tokenizer: Tuple[str, str],
+    backend: str,
+    dtype: str,
+    use_v2_block_manager: bool,
+    monkeypatch,
+    enable_prefix_caching: bool,
+    kv_cache_dtype: str,
+    enforce_eager: bool,
+) -> None:
+    """
+    Test num blocks allocated increases with KV cache sharing.
+    """
+    override_backend_env_variable(monkeypatch, backend)
+
+    model_name, tokenizer_name = model_and_tokenizer
+    
+    # Base.
+    with vllm_runner(
+            model_name,
+            tokenizer_name=tokenizer_name,
+            dtype=dtype,
+            enable_prefix_caching=enable_prefix_caching,
+            use_v2_block_manager=use_v2_block_manager,
+            kv_cache_dtype=kv_cache_dtype,
+            enforce_eager=enforce_eager,
+            kv_cache_map=None, # layer 0 shares kv cache with layer 1
+            debug_kv_sharing=False, # set q hidden states to 1.0 and store states/metadata.
+            gpu_memory_utilization=0.2
+    ) as vllm_model:
+
+        base_num_gpu_blocks = vllm_model.model.llm_engine.cache_config.num_gpu_blocks
+        base_num_cpu_blocks = vllm_model.model.llm_engine.cache_config.num_cpu_blocks
+
+    # Test: KV Cache Sharing.
+    with vllm_runner(
+            model_name,
+            tokenizer_name=tokenizer_name,
+            dtype=dtype,
+            enable_prefix_caching=enable_prefix_caching,
+            use_v2_block_manager=use_v2_block_manager,
+            kv_cache_dtype=kv_cache_dtype,
+            enforce_eager=enforce_eager,
+            kv_cache_map={0:0, 1:0}, # layer 0 shares kv cache with layer 1
+            debug_kv_sharing=False, # set q hidden states to 1.0 and store states/metadata.
+            gpu_memory_utilization=0.2
+    ) as vllm_model:
+        
+        test_num_gpu_blocks = vllm_model.model.llm_engine.cache_config.num_gpu_blocks
+        test_num_cpu_blocks = vllm_model.model.llm_engine.cache_config.num_cpu_blocks
+        
+    assert test_num_gpu_blocks >= 2*base_num_gpu_blocks
+    assert test_num_cpu_blocks >= 2*base_num_cpu_blocks
         
         
