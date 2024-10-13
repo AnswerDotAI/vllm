@@ -138,8 +138,8 @@ class LlamaAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         layer_id = int(self.prefix.split(".")[2])
-        compute_new_kv_map = self.cache_config.compute_new_kv_map.get(layer_id, True)
-        if compute_new_kv_map:
+        compute_new_kv = self.cache_config.compute_new_kv_map.get(layer_id, True)
+        if compute_new_kv:
             self.qkv_proj = QKVParallelLinear(
                 hidden_size=hidden_size,
                 head_size=self.head_dim,
@@ -189,6 +189,7 @@ class LlamaAttention(nn.Module):
                               quant_config=quant_config)
         
         if self.cache_config.debug_kv_sharing: self.attn_outputs = []
+        self.attn.impl.compute_new_kv = compute_new_kv
 
     def forward(
         self,
@@ -199,10 +200,8 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         # TODO(kerem): Modify kernels (prefill attention) extract KV from cache and (rotary) to allow only q without k,v.
         # compute_new_kv when value changes
-        layer_id = int(self.prefix.split(".")[2])
-        compute_new_kv_map = self.cache_config.compute_new_kv_map.get(layer_id, True)
 
-        if compute_new_kv_map:
+        if self.attn.impl.compute_new_kv:
             qkv, _ = self.qkv_proj(hidden_states) 
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q, k = self.rotary_emb(positions, q, k)
@@ -214,7 +213,7 @@ class LlamaAttention(nn.Module):
 
         # Change q to fixed input for testing.
         if self.cache_config.debug_kv_sharing: q = torch.ones_like(q)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata, compute_new_kv=compute_new_kv_map)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         if self.cache_config.debug_kv_sharing: self.attn_outputs.append(attn_output)
         output, _ = self.o_proj(attn_output)
         return output

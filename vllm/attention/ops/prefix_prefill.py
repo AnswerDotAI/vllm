@@ -253,7 +253,6 @@ if triton.__version__ >= "2.1.0":
                  (offs_m[:, None] < cur_batch_query_len))
         return
 
-
     @triton.jit
     def _fwd_kernel_flash_attn_v2(
         Q,
@@ -808,7 +807,6 @@ if triton.__version__ >= "2.1.0":
                 num_stages=1,
             )
             return
-
             
         _fwd_kernel[grid](
             q,

@@ -589,7 +589,7 @@ class CacheConfig:
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
-        kv_cache_map: int = {}, # layer id to physical kv cache index of `kv_cache` list
+        kv_cache_map: Dict[int, int] = {}, # layer id to physical kv cache index of `kv_cache` list
         debug_kv_sharing: bool = False,
     ) -> None:
         self.block_size = block_size

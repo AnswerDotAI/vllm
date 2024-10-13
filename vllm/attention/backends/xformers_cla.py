@@ -462,7 +462,6 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
-        compute_new_kv: bool = True,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -526,7 +525,7 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                                  "metadata attributes.")
 
         query = query.view(-1, self.num_heads, self.head_size)
-        if compute_new_kv:
+        if self.compute_new_kv:
             if key is not None:
                 assert value is not None
                 key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -606,7 +605,7 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
         if attn_type == AttentionType.DECODER:
             # Only enforce this shape-constraint for decoder
             # self-attention
-            if compute_new_kv:
+            if self.compute_new_kv:
                 assert key.shape[0] == num_prefill_tokens + num_decode_tokens
                 assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
@@ -625,7 +624,7 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
-                if compute_new_kv:
+                if self.compute_new_kv:
                     # print("Prefilling")
                     # print(prefill_meta.block_tables.shape, kv_cache.shape if kv_cache is not None else 'None')
                     # print(prefill_meta.block_tables)
@@ -654,7 +653,7 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                     prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_SHARED.name)
                 else:
                     # print("Profiling")
-                    if not compute_new_kv:
+                    if not self.compute_new_kv:
                         # kv_cache is not created yet during profiling, so we need to create key and value.
                         key = torch.zeros(query.size(0), self.num_kv_heads, self.head_size, dtype=query.dtype, device=query.device)
                         value = torch.zeros(query.size(0), self.num_kv_heads, self.head_size, dtype=query.dtype, device=query.device)
@@ -671,7 +670,7 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
                 
-                if kv_cache.numel() > 0 and not compute_new_kv:
+                if kv_cache.numel() > 0 and not self.compute_new_kv:
                     # Split kv_cache into key_cache and value_cache.
                     key_cache, value_cache = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
                     block_size = value_cache.size(-1)
@@ -713,7 +712,7 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
                 
-                if compute_new_kv:
+                if self.compute_new_kv:
                     prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PREFIX_CACHED_KV.name)
                 else:
                     prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PREFIX_CACHED_KV_SHARED.name)
@@ -741,7 +740,7 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                 k_scale,
                 v_scale,
             )
-            if compute_new_kv:
+            if self.compute_new_kv:
                 decode_meta.shared_self_attention_types.append(SharedSelfAttentionType.DECODE_KV_NEW.name)
             else:
                 decode_meta.shared_self_attention_types.append(SharedSelfAttentionType.DECODE_KV_SHARED.name)
