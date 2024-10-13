@@ -10,7 +10,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-
+from vllm.attention.backends.xformers_cla import XFormersCLAImpl
 
 class Attention(nn.Module):
     """Attention layer.
