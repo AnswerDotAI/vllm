@@ -526,12 +526,15 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                                  "metadata attributes.")
 
         query = query.view(-1, self.num_heads, self.head_size)
-        if key is not None:
-            assert value is not None
-            key = key.view(-1, self.num_kv_heads, self.head_size)
-            value = value.view(-1, self.num_kv_heads, self.head_size)
+        if compute_new_kv:
+            if key is not None:
+                assert value is not None
+                key = key.view(-1, self.num_kv_heads, self.head_size)
+                value = value.view(-1, self.num_kv_heads, self.head_size)
+            else:
+                assert value is None
         else:
-            assert value is None
+            assert key is None and value is None
 
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
@@ -563,28 +566,28 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory
                 # profiling run.
-                if compute_new_kv:
-                    PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                        value_cache,
-                                                        updated_slot_mapping,
-                                                        self.kv_cache_dtype,
-                                                        k_scale, v_scale)
-                    # print("Writing to KV cache")
-                    # print(f"updated_slot_mapping: {updated_slot_mapping}")
-                    # print(f"key.shape:{key.shape}, value.shape: {value.shape}")
-                else:
-                    # Use existing KV cache in proceeding layers sharing the cache.
-                    # query: shape = [num_tokens, num_heads * head_size]
-                    # key: shape = [num_tokens, num_kv_heads * head_size]
-                    # value: shape = [num_tokens, num_kv_heads * head_size]
-                    # kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                # if compute_new_kv:
+                PagedAttention.write_to_paged_cache(key, value, key_cache,
+                                                    value_cache,
+                                                    updated_slot_mapping,
+                                                    self.kv_cache_dtype,
+                                                    k_scale, v_scale)
+                # print("Writing to KV cache")
+                # print(f"updated_slot_mapping: {updated_slot_mapping}")
+                # print(f"key.shape:{key.shape}, value.shape: {value.shape}")
+                # else:
+                #     # Use existing KV cache in proceeding layers sharing the cache.
+                #     # query: shape = [num_tokens, num_heads * head_size]
+                #     # key: shape = [num_tokens, num_kv_heads * head_size]
+                #     # value: shape = [num_tokens, num_kv_heads * head_size]
+                #     # kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
                 
-                    # For decoding KV is not needed, KV cache is used instead - so no changes needed.
-                    # For prefill, KV is needed, so we need to extract it from the cache.
-                    # Cached prefill is implemented in PagedAttention.forward_prefix() as a new triton kernel.
-                    # Uses KV from cache, to compute self-attention.
-                    # print("Re-using KV cache")                    
-                    pass
+                #     # For decoding KV is not needed, KV cache is used instead - so no changes needed.
+                #     # For prefill, KV is needed, so we need to extract it from the cache.
+                #     # Cached prefill is implemented in PagedAttention.forward_prefix() as a new triton kernel.
+                #     # Uses KV from cache, to compute self-attention.
+                #     # print("Re-using KV cache")                    
+                #     pass
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -603,8 +606,9 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
         if attn_type == AttentionType.DECODER:
             # Only enforce this shape-constraint for decoder
             # self-attention
-            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+            if compute_new_kv:
+                assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+                assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
@@ -650,6 +654,10 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                     prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_SHARED.name)
                 else:
                     # print("Profiling")
+                    if not compute_new_kv:
+                        # kv_cache is not created yet during profiling, so we need to create key and value.
+                        key = torch.zeros(query.size(0), self.num_kv_heads, self.head_size, dtype=query.dtype, device=query.device)
+                        value = torch.zeros(query.size(0), self.num_kv_heads, self.head_size, dtype=query.dtype, device=query.device)
                     prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_PROFILING.name)
 
                 out = self._run_memory_efficient_xformers_forward(query, key, value, prefill_meta, attn_type=attn_type)
