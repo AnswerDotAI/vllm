@@ -807,7 +807,7 @@ if triton.__version__ >= "2.1.0":
                 num_stages=1,
             )
             return
-            
+
         _fwd_kernel[grid](
             q,
             k,
@@ -859,4 +859,3 @@ if triton.__version__ >= "2.1.0":
             num_stages=1,
         )
         return
-    
