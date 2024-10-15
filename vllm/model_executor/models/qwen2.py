@@ -60,21 +60,16 @@ class Qwen2MLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
-            layer_name="gate_up_proj",
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
+            quant_config=quant_config)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
-                                           layer_name="down_proj",
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.down_proj")
+                                           quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -97,8 +92,7 @@ class Qwen2Attention(nn.Module):
                  rope_theta: float = 10000,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 rope_scaling: Optional[Tuple] = None,
-                 prefix: str = "") -> None:
+                 rope_scaling: Optional[Tuple] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -128,16 +122,12 @@ class Qwen2Attention(nn.Module):
             self.total_num_kv_heads,
             bias=True,
             quant_config=quant_config,
-            layer_name="qkv_proj",
-            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             quant_config=quant_config,
-            layer_name="o_proj",
-            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -176,7 +166,6 @@ class Qwen2DecoderLayer(nn.Module):
         config: Qwen2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -191,14 +180,13 @@ class Qwen2DecoderLayer(nn.Module):
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=rope_scaling,
-            prefix=f"{prefix}.self_attn")
+            rope_scaling=rope_scaling)
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
-            prefix=f"{prefix}.mlp")
+        )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -261,9 +249,9 @@ class Qwen2Model(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Qwen2DecoderLayer(config=config,
                                              cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
-            prefix=f"{prefix}.layers")
+                                             quant_config=quant_config),
+            prefix=f"{prefix}.layers",
+        )
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(

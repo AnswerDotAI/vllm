@@ -48,7 +48,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+from .utils import (PPMissingLayer, group_weights_with_prefix,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
