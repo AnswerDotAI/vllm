@@ -371,6 +371,7 @@ __device__ void paged_attention_mlrd_palu_kernel(
           k_vecs[j] = k_vecs_up[j];
       }
 
+      // TODO(kerem): Apply RoPE to k_vecs.
 
       // Compute dot product.
       // This includes a reduction across the threads in the same thread group.
