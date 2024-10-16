@@ -436,7 +436,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
-
+        
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
@@ -605,7 +605,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
-
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
 

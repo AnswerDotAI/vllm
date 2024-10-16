@@ -23,6 +23,7 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
+import copy
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -172,7 +173,7 @@ class LlamaAttention(nn.Module):
         #     quant_config=quant_config,
         #     layer_name="o_proj",
         #     prefix=f"{prefix}.o_proj",
-        # )        
+        # )    
 
         is_neox_style = True
         if quant_config is not None and quant_config.get_name() == "gguf":
@@ -186,11 +187,18 @@ class LlamaAttention(nn.Module):
             rope_scaling=rope_scaling,
             is_neox_style=is_neox_style,
         )
+        
+        layer_idx = int(prefix.split(".")[-2])
+        use_swa = cache_config.swa_layers and layer_idx in cache_config.swa_layers
+        # TODO is this hacky? Should we pass the regular cache config and layer_idx to Attention and let it set the sliding window directly?
+        cache_config_ = copy.deepcopy(cache_config)
+        if use_swa: cache_config_.sliding_window = 32  # TODO make it a parameter
+
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
+                              cache_config=cache_config_,
                               quant_config=quant_config)
 
     def forward(
@@ -231,6 +239,7 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
+    
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -497,7 +506,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            print(f"Loading {name}")
+            # print(f"Loading {name}")
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -562,7 +571,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                         "found the expected name in the model. The weight is "
                         "not loaded.")
             
-            print(f"Loaded {name}")
+            # print(f"Loaded {name}")
             
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

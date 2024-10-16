@@ -147,7 +147,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
         computed_block_nums = inter_data.computed_block_nums
-
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],

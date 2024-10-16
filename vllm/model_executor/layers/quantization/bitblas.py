@@ -23,6 +23,7 @@ from bitblas.module import auto_detect_nvidia_target, BITBLAS_DATABASE_PATH
 from pathlib import Path
 
 BITBLAS_DATABASE_PATH = os.environ.get("BITBLAS_DATABASE_PATH", str(Path.home() / ".cache" / "bitblas"))
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 BITBLAS_TARGET = auto_detect_nvidia_target()
 
 def _get_or_create_bitblas_operator(config):
