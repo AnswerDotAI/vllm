@@ -175,10 +175,10 @@ __device__ void paged_attention_mlrd_palu_kernel(
   // thread group is 4 and the data type is half, then the vector size is 16 /
   // (4 * sizeof(half)) == 2.
   constexpr int VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1);
-  constexpr int PALU_VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(cache_t)), 1) / (HEAD_SIZE / PALU_HEAD_SIZE);
+  constexpr int PALU_VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)) / (HEAD_SIZE / PALU_HEAD_SIZE), 1);
   using K_vec = typename Vec<scalar_t, PALU_VEC_SIZE>::Type;
   using Q_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
-  using Quant_vec = typename Vec<cache_t, VEC_SIZE>::Type;
+  using Quant_vec = typename Vec<cache_t, PALU_VEC_SIZE>::Type;
 
   constexpr int NUM_ELEMS_PER_THREAD = HEAD_SIZE / THREAD_GROUP_SIZE;
   constexpr int NUM_PALU_ELEMS_PER_THREAD = PALU_HEAD_SIZE / THREAD_GROUP_SIZE;
@@ -319,7 +319,7 @@ __device__ void paged_attention_mlrd_palu_kernel(
       Q_vec k_vecs_up[NUM_VECS_PER_THREAD];
       
       // Load palu_k_up_proj matrix into shared memory
-      // - palu_k_up_proj is a [num_heads, PALU_HEAD_SIZE, HEAD_SIZE] matrix in global memory
+      // - palu_k_up_proj is a [num_kv_heads, PALU_HEAD_SIZE, HEAD_SIZE] matrix in global memory
       // - We load the slice for the current head (head_idx) into shared memory
       // - Using all NUM_THREADS threads to load, regardless of their dimensional arrangement
       // - Each thread may load multiple elements if PALU_HEAD_SIZE * HEAD_SIZE > NUM_THREADS
@@ -331,7 +331,7 @@ __device__ void paged_attention_mlrd_palu_kernel(
       for (int i = threadIdx.x; i < num_elements; i += NUM_THREADS) {
           int row = i / HEAD_SIZE;
           int col = i % HEAD_SIZE;
-          shared_palu_k_up_proj[row][col] = palu_k_up_proj[head_idx * num_elements + i];
+          shared_palu_k_up_proj[row][col] = palu_k_up_proj[kv_head_idx * num_elements + i];
       }
       __syncthreads();
 
@@ -354,7 +354,7 @@ __device__ void paged_attention_mlrd_palu_kernel(
       //     reinterpret_cast<scalar_t*>(&k_vecs_up[k_vecs_up_idx])[k_vecs_up_elem_idx] = vec_up_elem;
       // }
       for (int j = 0; j < HEAD_SIZE; j += VEC_SIZE) {
-          Q_vec result = {0};
+          Q_vec result;
           for (int i = 0; i < PALU_HEAD_SIZE; i++) {
               K_vec k_vec = k_vecs[i / PALU_VEC_SIZE];
               scalar_t k_elem = reinterpret_cast<scalar_t*>(&k_vec)[i % PALU_VEC_SIZE];
@@ -367,16 +367,31 @@ __device__ void paged_attention_mlrd_palu_kernel(
           k_vecs_up[j / VEC_SIZE] = result;
       }
 
-      for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
-          k_vecs[j] = k_vecs_up[j];
-      }
+      // TODO(kerem): Release memory for k_vecs and palu_k_up_proj.
+      // Maybe automatically handled by CUDA runtime.
+      // Ensure all threads have finished using shared memory
+      // __threadfence_block();
+
+      // // Optionally clear shared memory (generally not necessary)
+      // for (int i = threadIdx.x; i < PALU_HEAD_SIZE * HEAD_SIZE; i += NUM_THREADS) {
+      //     int row = i / HEAD_SIZE;
+      //     int col = i % HEAD_SIZE;
+      //     shared_palu_k_up_proj[row][col] = 0;
+      // }
+      // __syncthreads();
+
+      // // Optionally clear k_vecs (if you're sure it's not needed anymore)
+      // for (int i = 0; i < NUM_PALU_VECS_PER_THREAD; i++) {
+      //     k_vecs[i] = K_vec{0};
+      // }
+
 
       // TODO(kerem): Apply RoPE to k_vecs.
 
       // Compute dot product.
       // This includes a reduction across the threads in the same thread group.
       float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
-                             q_vecs[thread_group_offset], k_vecs);
+                             q_vecs[thread_group_offset], k_vecs_up);
       // Add the ALiBi bias if slopes are given.
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
 
@@ -588,7 +603,7 @@ __global__ void paged_attention_mlrd_palu_v1_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
     const cache_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
                                           // head_size/x, block_size, x]
-    const scalar_t* __restrict__ palu_k_up_proj,  // [num_heads, palu_head_size, head_size]
+    const scalar_t* __restrict__ palu_k_up_proj,  // [num_kv_heads, palu_head_size, head_size]
     const cache_t* __restrict__ v_cache,  // [num_blocks, num_kv_heads,
                                           // head_size, block_size]
     const int num_kv_heads,               // [num_heads]
@@ -793,8 +808,6 @@ void paged_attention_mlrd_palu_v1_launcher(
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
 
-  // set WARP_SIZE equal to BLOCK_SIZE so that thread group size is 1.
-  WARP_SIZE = BLOCK_SIZE;
   [[maybe_unused]] int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
 
@@ -929,12 +942,6 @@ void paged_attention_mlrd_palu_v1_launcher(
 // 1, 2, 4, 64, 128, 256.
 #define CALL_MLRD_PALU_V1_LAUNCHER_BLOCK_SIZE(T, CACHE_T, KV_DTYPE)         \
   switch (block_size) {                                           \
-    case 8:                                                       \
-      CALL_MLRD_PALU_V1_LAUNCHER_SPARSITY(T, CACHE_T, 8, KV_DTYPE);         \
-      break;                                                      \
-    case 16:                                                      \
-      CALL_MLRD_PALU_V1_LAUNCHER_SPARSITY(T, CACHE_T, 16, KV_DTYPE);        \
-      break;                                                      \
     case 32:                                                      \
       CALL_MLRD_PALU_V1_LAUNCHER_SPARSITY(T, CACHE_T, 32, KV_DTYPE);        \
       break;                                                      \
@@ -948,7 +955,7 @@ void paged_attention_mlrd_palu_v1(
     torch::Tensor& query,  // [num_seqs, num_heads, head_size]
     torch::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
-    torch::Tensor& palu_k_up_proj, // [num_heads, palu_head_size, block_size]
+    torch::Tensor& palu_k_up_proj, // [num_kv_heads, palu_head_size, block_size]
     torch::Tensor&
         value_cache,       // [num_blocks, num_heads, head_size, block_size]
     int64_t num_kv_heads,  // [num_heads]
@@ -964,7 +971,7 @@ void paged_attention_mlrd_palu_v1(
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
 
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
-                             CALL_V1_LAUNCHER_BLOCK_SIZE)
+                             CALL_MLRD_PALU_V1_LAUNCHER_BLOCK_SIZE)
 }
 
 #define LAUNCH_PAGED_ATTENTION_MLRD_PALU_V2(HEAD_SIZE, PALU_HEAD_SIZE)                                   \
@@ -1005,8 +1012,6 @@ void paged_attention_mlrd_palu_v2_launcher(
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
 
-  // set WARP_SIZE equal to BLOCK_SIZE so that thread group size is 1.
-  WARP_SIZE = BLOCK_SIZE;
   [[maybe_unused]] int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
 
@@ -1147,12 +1152,6 @@ void paged_attention_mlrd_palu_v2_launcher(
 // 1, 2, 4, 64, 128, 256.
 #define CALL_MLRD_PALU_V2_LAUNCHER_BLOCK_SIZE(T, CACHE_T, KV_DTYPE)         \
   switch (block_size) {                                           \
-    case 8:                                                       \
-      CALL_MLRD_PALU_V2_LAUNCHER_SPARSITY(T, CACHE_T, 8, KV_DTYPE);         \
-      break;                                                      \
-    case 16:                                                      \
-      CALL_MLRD_PALU_V2_LAUNCHER_SPARSITY(T, CACHE_T, 16, KV_DTYPE);        \
-      break;                                                      \
     case 32:                                                      \
       CALL_MLRD_PALU_V2_LAUNCHER_SPARSITY(T, CACHE_T, 32, KV_DTYPE);        \
       break;                                                      \
@@ -1170,7 +1169,7 @@ void paged_attention_mlrd_palu_v2(
     torch::Tensor& query,  // [num_seqs, num_heads, head_size]
     torch::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
-    torch::Tensor& palu_k_up_proj, // [num_heads, palu_head_size, block_size]
+    torch::Tensor& palu_k_up_proj, // [num_kv_heads, palu_head_size, block_size]
     torch::Tensor&
         value_cache,       // [num_blocks, num_heads, head_size, block_size]
     int64_t num_kv_heads,  // [num_heads]
@@ -1185,7 +1184,7 @@ void paged_attention_mlrd_palu_v2(
     const int64_t blocksparse_head_sliding_step) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
-                             CALL_V2_LAUNCHER_BLOCK_SIZE)
+                             CALL_MLRD_PALU_V2_LAUNCHER_BLOCK_SIZE)
 }
 
 #undef WARP_SIZE
