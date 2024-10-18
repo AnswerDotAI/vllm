@@ -102,10 +102,10 @@ __device__ void paged_attention_mlrd_palu_kernel(
                                  // head_size]
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
     const cache_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
-                                          // head_size/x, block_size, x]
+                                          // palu_head_size/x, block_size, x]
     const scalar_t* __restrict__ palu_k_up_proj,  // [num_heads, palu_head_size, head_size]
     const cache_t* __restrict__ v_cache,  // [num_blocks, num_kv_heads,
-                                          // head_size, block_size]
+                                          // palu_head_size, block_size]
     const int num_kv_heads,               // [num_heads]
     const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
@@ -126,7 +126,6 @@ __device__ void paged_attention_mlrd_palu_kernel(
     return;
   }
   // Set WARP_SIZE to BLOCK_SIZE so that each thread will process all elements of a single head of a single key token.
-  // #define WARP_SIZE BLOCK_SIZE
   // check that WARP_SIZE is equal to BLOCK_SIZE, otherwise raise an error
   if (WARP_SIZE != BLOCK_SIZE) {
     printf("Error: WARP_SIZE and BLOCK_SIZE should be equal to have a thread group size of 1 for MLRD Palu kernel.\n");
@@ -314,8 +313,8 @@ __device__ void paged_attention_mlrd_palu_kernel(
       // Each element of k_vec will be up projected from PALU_VEC_SIZE to VEC_SIZE.
       // k_vecs has NUM_PALU_VECS_PER_THREAD many vectors with PALU_VEC_SIZE elements each. 
       // Also, let's say PALU_HEAD_SIZE=32 and HEAD_SIZE=128 this means compression rate is 4.
-      // palu_k_up_proj is [32, 128] matrix which will up project k_vecs.
-      // k_vecs has all the elements of a single token of a single key head.
+      // shared_palu_k_up_proj is [32, 128] matrix which will up project k_vecs.
+      // k_vecs and k_vecs_up have all the elements of a single token of a single key head.
       Q_vec k_vecs_up[NUM_VECS_PER_THREAD];
       
       // Load palu_k_up_proj matrix into shared memory
@@ -341,18 +340,6 @@ __device__ void paged_attention_mlrd_palu_kernel(
       // PALU_HEAD_SIZE = 128 and HEAD_SIZE = 256.
       // Up projection is responsible for dot product between all elements of k_vecs and a given column of palu_k_up_proj matrix.
       // The index of resulting dot product is stored in k_vecs_up.
-      // for (int j = 0; j < HEAD_SIZE; j++) {
-      //     int k_vecs_up_idx = j / VEC_SIZE;
-      //     int k_vecs_up_elem_idx = j % VEC_SIZE;
-
-      //     scalar_t vec_up_elem = 0;
-      //     for (int i = 0; i < PALU_HEAD_SIZE; i++) {
-      //         int k_vecs_idx = i / PALU_VEC_SIZE;
-      //         int k_vecs_elem_idx = i % PALU_VEC_SIZE;        
-      //         vec_up_elem += reinterpret_cast<scalar_t*>(&k_vecs[k_vecs_idx])[k_vecs_elem_idx] * shared_palu_k_up_proj[i][j];
-      //     }
-      //     reinterpret_cast<scalar_t*>(&k_vecs_up[k_vecs_up_idx])[k_vecs_up_elem_idx] = vec_up_elem;
-      // }
       for (int j = 0; j < HEAD_SIZE; j += VEC_SIZE) {
           Q_vec result;
           for (int i = 0; i < PALU_HEAD_SIZE; i++) {
@@ -367,7 +354,27 @@ __device__ void paged_attention_mlrd_palu_kernel(
           k_vecs_up[j / VEC_SIZE] = result;
       }
 
-      // TODO(kerem): Release memory for k_vecs and palu_k_up_proj.
+
+      // // DEBUG BEGIN: Test if issue is filling the k_vecs_up incorrectly above.
+      // // Up projection with matrix [PALU_HEAD_SIZE, HEAD_SIZE] per thread, k_vecs and k_vecs_up are per thread.
+      // // For debugging: Set all elements of k_vecs_up to 1
+      // for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
+      //     Q_vec ones;
+      //     #pragma unroll
+      //     for (int l = 0; l < VEC_SIZE; l++) {
+      //         reinterpret_cast<scalar_t*>(&ones)[l] = 1.0f;
+      //     }
+      //     k_vecs_up[j] = ones;
+      // }      
+
+      // // Assert all elements in k_vecs_up[0] are 1s.
+      // scalar_t* k_vecs_up_ptr = reinterpret_cast<scalar_t*>(&k_vecs_up[0]);
+      // for (int i = 0; i < VEC_SIZE; i++) {
+      //     assert(k_vecs_up_ptr[i] == 1.0f);
+      // }
+      // // DEBUG END
+
+      // TODO(kerem): Release memory for k_vecs and palu_k_up_proj if necesary.
       // Maybe automatically handled by CUDA runtime.
       // Ensure all threads have finished using shared memory
       // __threadfence_block();
@@ -465,7 +472,7 @@ __device__ void paged_attention_mlrd_palu_kernel(
   constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;
   constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
   constexpr int NUM_ROWS_PER_THREAD =
-      DIVIDE_ROUND_UP(HEAD_SIZE, NUM_ROWS_PER_ITER);
+      DIVIDE_ROUND_UP(PALU_HEAD_SIZE, NUM_ROWS_PER_ITER);
 
   // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
   float accs[NUM_ROWS_PER_THREAD];
@@ -503,7 +510,7 @@ __device__ void paged_attention_mlrd_palu_kernel(
 #pragma unroll
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-      if (row_idx < HEAD_SIZE) {
+      if (row_idx < PALU_HEAD_SIZE) {
         const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
         V_vec v_vec;
 
@@ -554,11 +561,11 @@ __device__ void paged_attention_mlrd_palu_kernel(
     int mid = i / 2;
     // Upper warps write to shared memory.
     if (warp_idx >= mid && warp_idx < i) {
-      float* dst = &out_smem[(warp_idx - mid) * HEAD_SIZE];
+      float* dst = &out_smem[(warp_idx - mid) * PALU_HEAD_SIZE];
 #pragma unroll
       for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
         const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-        if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
+        if (row_idx < PALU_HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
           dst[row_idx] = accs[i];
         }
       }
@@ -567,11 +574,11 @@ __device__ void paged_attention_mlrd_palu_kernel(
 
     // Lower warps update the output.
     if (warp_idx < mid) {
-      const float* src = &out_smem[warp_idx * HEAD_SIZE];
+      const float* src = &out_smem[warp_idx * PALU_HEAD_SIZE];
 #pragma unroll
       for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
         const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-        if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
+        if (row_idx < PALU_HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
           accs[i] += src[row_idx];
         }
       }
@@ -582,12 +589,12 @@ __device__ void paged_attention_mlrd_palu_kernel(
   // Write the final output.
   if (warp_idx == 0) {
     scalar_t* out_ptr =
-        out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
-        head_idx * max_num_partitions * HEAD_SIZE + partition_idx * HEAD_SIZE;
+        out + seq_idx * num_heads * max_num_partitions * PALU_HEAD_SIZE +
+        head_idx * max_num_partitions * PALU_HEAD_SIZE + partition_idx * PALU_HEAD_SIZE;
 #pragma unroll
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
-      if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
+      if (row_idx < PALU_HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
         from_float(*(out_ptr + row_idx), accs[i]);
       }
     }
