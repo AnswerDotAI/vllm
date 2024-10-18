@@ -565,28 +565,11 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory
                 # profiling run.
-                # if compute_new_kv:
                 PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                     value_cache,
                                                     updated_slot_mapping,
                                                     self.kv_cache_dtype,
                                                     k_scale, v_scale)
-                # print("Writing to KV cache")
-                # print(f"updated_slot_mapping: {updated_slot_mapping}")
-                # print(f"key.shape:{key.shape}, value.shape: {value.shape}")
-                # else:
-                #     # Use existing KV cache in proceeding layers sharing the cache.
-                #     # query: shape = [num_tokens, num_heads * head_size]
-                #     # key: shape = [num_tokens, num_kv_heads * head_size]
-                #     # value: shape = [num_tokens, num_kv_heads * head_size]
-                #     # kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
-                
-                #     # For decoding KV is not needed, KV cache is used instead - so no changes needed.
-                #     # For prefill, KV is needed, so we need to extract it from the cache.
-                #     # Cached prefill is implemented in PagedAttention.forward_prefix() as a new triton kernel.
-                #     # Uses KV from cache, to compute self-attention.
-                #     # print("Re-using KV cache")                    
-                #     pass
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -636,19 +619,10 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                     # print("Prefilling with KV cache")
                     # Split kv_cache into key_cache and value_cache.
                     key_cache, value_cache = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-                    block_size = value_cache.size(-1)
-                    
+                                            
                     # Extract KV from cache using slot_mapping.
-                    k_reshaped, v_reshaped = convert_cache_to_original_shape(key_cache, value_cache, self.num_kv_heads, self.head_size)
-                    slot_mapping = prefill_meta.slot_mapping
-                    block_idxs, token_idxs = slot_mapping // block_size, slot_mapping % block_size
-                    key, value = k_reshaped[block_idxs, token_idxs], v_reshaped[block_idxs, token_idxs]
-                    if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                        key = (key.view(torch.float8_e4m3fn).to(torch.float32) * k_scale).to(query.dtype)
-                        value = (value.view(torch.float8_e4m3fn).to(torch.float32) * v_scale).to(query.dtype)
-                    elif self.kv_cache_dtype == "fp8_e5m2":
-                        key = (key.view(torch.float8_e5m2).to(torch.float32) * k_scale).to(query.dtype)
-                        value = (value.view(torch.float8_e5m2).to(torch.float32) * v_scale).to(query.dtype)
+                    key, value = extract_kv_from_cache(key_cache, value_cache, prefill_meta.slot_mapping, self.num_kv_heads, 
+                                                       self.head_size, self.kv_cache_dtype, k_scale, v_scale, query.dtype)
                     
                     prefill_meta.shared_self_attention_types.append(SharedSelfAttentionType.PREFILL_KV_SHARED.name)
                 else:
@@ -673,19 +647,10 @@ class XFormersCLAImpl(AttentionImpl[XFormersCLAMetadata]):
                 if kv_cache.numel() > 0 and not self.compute_new_kv:
                     # Split kv_cache into key_cache and value_cache.
                     key_cache, value_cache = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_size)
-                    block_size = value_cache.size(-1)
                     
                     # Extract KV from cache using slot_mapping.
-                    k_reshaped, v_reshaped = convert_cache_to_original_shape(key_cache, value_cache, self.num_kv_heads, self.head_size)
-                    slot_mapping = prefill_meta.slot_mapping
-                    block_idxs, token_idxs = slot_mapping // block_size, slot_mapping % block_size
-                    key, value = k_reshaped[block_idxs, token_idxs], v_reshaped[block_idxs, token_idxs]
-                    if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                        key = (key.view(torch.float8_e4m3fn).to(torch.float32) * k_scale).to(query.dtype)
-                        value = (value.view(torch.float8_e4m3fn).to(torch.float32) * v_scale).to(query.dtype)
-                    elif self.kv_cache_dtype == "fp8_e5m2":
-                        key = (key.view(torch.float8_e5m2).to(torch.float32) * k_scale).to(query.dtype)
-                        value = (value.view(torch.float8_e5m2).to(torch.float32) * v_scale).to(query.dtype)
+                    key, value = extract_kv_from_cache(key_cache, value_cache, prefill_meta.slot_mapping, self.num_kv_heads, 
+                                                       self.head_size, self.kv_cache_dtype, k_scale, v_scale, query.dtype)
 
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
@@ -925,3 +890,37 @@ def convert_cache_to_original_shape(k_cache, v_cache, num_kv_heads, head_size):
     v_standard = v_standard.reshape(num_blocks, block_size, num_kv_heads, head_size)
     
     return k_standard, v_standard
+
+
+def extract_kv_from_cache(key_cache, value_cache, slot_mapping, num_kv_heads, head_size, kv_cache_dtype, k_scale, v_scale, query_dtype):
+    """
+    Extract key and value tensors from the KV cache.
+    
+    Args:
+    key_cache (torch.Tensor): The key cache tensor
+    value_cache (torch.Tensor): The value cache tensor
+    slot_mapping (torch.Tensor): The slot mapping tensor
+    num_kv_heads (int): Number of key/value heads
+    head_size (int): Size of each head
+    kv_cache_dtype (str): Data type of the KV cache
+    k_scale (float): Scale factor for keys
+    v_scale (float): Scale factor for values
+    query_dtype (torch.dtype): Data type of the query tensor
+    
+    Returns:
+    tuple: (key, value) - Extracted key and value tensors
+    """
+    block_size = value_cache.size(-1)
+    
+    k_reshaped, v_reshaped = convert_cache_to_original_shape(key_cache, value_cache, num_kv_heads, head_size)
+    block_idxs, token_idxs = slot_mapping // block_size, slot_mapping % block_size
+    key, value = k_reshaped[block_idxs, token_idxs], v_reshaped[block_idxs, token_idxs]
+    
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        key = (key.view(torch.float8_e4m3fn).to(torch.float32) * k_scale).to(query_dtype)
+        value = (value.view(torch.float8_e4m3fn).to(torch.float32) * v_scale).to(query_dtype)
+    elif kv_cache_dtype == "fp8_e5m2":
+        key = (key.view(torch.float8_e5m2).to(torch.float32) * k_scale).to(query_dtype)
+        value = (value.view(torch.float8_e5m2).to(torch.float32) * v_scale).to(query_dtype)
+    
+    return key, value
