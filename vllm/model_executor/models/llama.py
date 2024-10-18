@@ -82,15 +82,6 @@ class LlamaMLP(nn.Module):
                                            layer_name="down_proj",
                                            prefix=f"{prefix}.down_proj")
         
-        # self.down_proj = ColumnParallelLinear(input_size=intermediate_size,
-        #                                     output_size=hidden_size,
-        #                                     bias=bias,
-        #                                     gather_output=True,
-        #                                     quant_config=quant_config,
-        #                                     layer_name="down_proj",
-        #                                     prefix=f"{prefix}.down_proj")
-        # print("Initialized down_proj with ColumnParallelLinear")
-            
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -120,6 +111,8 @@ class LlamaAttention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.cache_config = cache_config
+        self.prefix = prefix
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -144,16 +137,28 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size=hidden_size,
-            head_size=self.head_dim,
-            total_num_heads=self.total_num_heads,
-            total_num_kv_heads=self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-            layer_name="qkv_proj",
-            prefix=f"{prefix}.qkv_proj",
-        )
+        layer_id = int(self.prefix.split(".")[2])
+        compute_new_kv = self.cache_config.compute_new_kv_map.get(layer_id, True)
+        if compute_new_kv:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size=hidden_size,
+                head_size=self.head_dim,
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                bias=bias,
+                quant_config=quant_config,
+                layer_name="qkv_proj",
+                prefix=f"{prefix}.qkv_proj",
+            )
+        else:
+            self.q_proj = ColumnParallelLinear(
+                input_size=hidden_size,
+                output_size=self.total_num_heads * self.head_dim,
+                bias=bias,
+                quant_config=quant_config,
+                layer_name="q_proj",
+                prefix=f"{prefix}.q_proj",
+            )            
 
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
@@ -164,16 +169,6 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         
-        # self.o_proj = ColumnParallelLinear(
-        #     input_size=self.total_num_heads * self.head_dim,
-        #     output_size=hidden_size,
-        #     bias=bias,
-        #     gather_output=True,
-        #     quant_config=quant_config,
-        #     layer_name="o_proj",
-        #     prefix=f"{prefix}.o_proj",
-        # )        
-
         is_neox_style = True
         if quant_config is not None and quant_config.get_name() == "gguf":
             is_neox_style = False
@@ -192,6 +187,9 @@ class LlamaAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
+        
+        if self.cache_config.debug_kv_sharing: self.attn_outputs = []
+        self.attn.impl.compute_new_kv = compute_new_kv
 
     def forward(
         self,
@@ -200,10 +198,23 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        # TODO(kerem): Modify kernels (prefill attention) extract KV from cache and (rotary) to allow only q without k,v.
+        # compute_new_kv when value changes
+
+        if self.attn.impl.compute_new_kv:
+            qkv, _ = self.qkv_proj(hidden_states) 
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k = self.rotary_emb(positions, q, k)
+        else:
+            q, _ = self.q_proj(hidden_states)
+            k = torch.zeros(q.size(0), self.kv_size, device=q.device, dtype=q.dtype)
+            q, k = self.rotary_emb(positions, q, k) # this is a fused kernel so need a dummy `k`.
+            k,v = None,None
+
+        # Change q to fixed input for testing.
+        if self.cache_config.debug_kv_sharing: q = torch.ones_like(q)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        if self.cache_config.debug_kv_sharing: self.attn_outputs.append(attn_output)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -286,6 +297,17 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+def compute_new_kv_map(kv_cache_map) -> dict[int, bool]:
+    if kv_cache_map is None: return {}
+    prev_id = None
+    comput_new_kv_map = {}
+    for k,v in kv_cache_map.items():
+        if prev_id is None or v != prev_id:
+            comput_new_kv_map[k] = True
+        else:
+            comput_new_kv_map[k] = False
+        prev_id = v
+    return comput_new_kv_map
 
 class LlamaModel(nn.Module):
 
@@ -299,6 +321,8 @@ class LlamaModel(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        self.cache_config = cache_config
+        self.cache_config.compute_new_kv_map = compute_new_kv_map(cache_config.kv_cache_map)
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
@@ -325,6 +349,8 @@ class LlamaModel(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        
+        self.attn_metadatas = []
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -348,13 +374,18 @@ class LlamaModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
+        
+        self.attn_metadatas.append(attn_metadata)
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
+            if self.cache_config.kv_cache_map:
+                kv_cache = kv_caches[self.cache_config.kv_cache_map[i]]
+            else:
+                kv_cache = kv_caches[i - self.start_layer]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
+                kv_cache,
                 attn_metadata,
                 residual,
             )
@@ -497,7 +528,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            print(f"Loading {name}")
+            # print(f"Loading {name}")
+            layer_id = int(name.split(".")[2]) if "layers" in name else -1
+            compute_new_kv = self.model.cache_config.compute_new_kv_map.get(layer_id, True)
+            
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -521,6 +555,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                if any(proj in name for proj in [".k_proj", ".v_proj", ".q_proj"]) and not compute_new_kv:
+                    continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
@@ -532,6 +568,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
+                    print(f"Loaded {name} as stacked/fused parameter")
                 else: 
                     # for running without dora layers. quantized only.
                     print(
@@ -555,6 +592,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+                    print(f"Loaded {name} as regular parameter")
                 else: 
                     # for running without dora layers. quantized only.
                     print(
@@ -562,7 +600,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                         "found the expected name in the model. The weight is "
                         "not loaded.")
             
-            print(f"Loaded {name}")
+            # print(f"Loaded {name}")
             
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
