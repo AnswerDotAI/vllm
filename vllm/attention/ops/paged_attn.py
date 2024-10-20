@@ -102,6 +102,8 @@ class PagedAttention:
         blocksparse_vert_stride: int = 0,
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
+        use_mlrd_palu: bool = False,
+        palu_k_up_proj: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
@@ -128,27 +130,51 @@ class PagedAttention:
 
         if use_v1:
             # Run PagedAttention V1.
-            ops.paged_attention_v1(
-                output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-                tp_rank,
-                blocksparse_local_blocks,
-                blocksparse_vert_stride,
-                blocksparse_block_size,
-                blocksparse_head_sliding_step,
-            )
+            if use_mlrd_palu and palu_k_up_proj is not None:
+                ops.paged_attention_mlrd_palu_v1(
+                    output,
+                    query,
+                    key_cache,
+                    palu_k_up_proj,
+                    value_cache,
+                    num_kv_heads,
+                    scale,
+                    block_tables,
+                    seq_lens,
+                    block_size,
+                    max_seq_len,
+                    alibi_slopes,
+                    kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                    tp_rank,
+                    blocksparse_local_blocks,
+                    blocksparse_vert_stride,
+                    blocksparse_block_size,
+                    blocksparse_head_sliding_step,
+                )                
+            else:
+                ops.paged_attention_v1(
+                    output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    num_kv_heads,
+                    scale,
+                    block_tables,
+                    seq_lens,
+                    block_size,
+                    max_seq_len,
+                    alibi_slopes,
+                    kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                    tp_rank,
+                    blocksparse_local_blocks,
+                    blocksparse_vert_stride,
+                    blocksparse_block_size,
+                    blocksparse_head_sliding_step,
+                )
         else:
             # Run PagedAttention V2.
             assert _PARTITION_SIZE % block_size == 0
@@ -163,30 +189,57 @@ class PagedAttention:
                 device=output.device,
             )
             max_logits = torch.empty_like(exp_sums)
-            ops.paged_attention_v2(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                seq_lens,
-                block_size,
-                max_seq_len,
-                alibi_slopes,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-                tp_rank,
-                blocksparse_local_blocks,
-                blocksparse_vert_stride,
-                blocksparse_block_size,
-                blocksparse_head_sliding_step,
-            )
+            if use_mlrd_palu and palu_k_up_proj is not None:
+                ops.paged_attention_mlrd_palu_v2(
+                    output,
+                    exp_sums,
+                    max_logits,
+                    tmp_output,
+                    query,
+                    key_cache,
+                    palu_k_up_proj,
+                    value_cache,
+                    num_kv_heads,
+                    scale,
+                    block_tables,
+                    seq_lens,
+                    block_size,
+                    max_seq_len,
+                    alibi_slopes,
+                    kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                    tp_rank,
+                    blocksparse_local_blocks,
+                    blocksparse_vert_stride,
+                    blocksparse_block_size,
+                    blocksparse_head_sliding_step,
+                )                
+            else:
+                ops.paged_attention_v2(
+                    output,
+                    exp_sums,
+                    max_logits,
+                    tmp_output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    num_kv_heads,
+                    scale,
+                    block_tables,
+                    seq_lens,
+                    block_size,
+                    max_seq_len,
+                    alibi_slopes,
+                    kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                    tp_rank,
+                    blocksparse_local_blocks,
+                    blocksparse_vert_stride,
+                    blocksparse_block_size,
+                    blocksparse_head_sliding_step,
+                )
         return output
 
     @staticmethod
