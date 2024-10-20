@@ -190,6 +190,23 @@ __device__ void paged_attention_mlrd_palu_kernel(
   const int thread_group_idx = thread_idx / THREAD_GROUP_SIZE;
   const int thread_group_offset = thread_idx % THREAD_GROUP_SIZE;
 
+  // Load palu_k_up_proj matrix into shared memory
+  // - palu_k_up_proj is a [num_kv_heads, PALU_HEAD_SIZE, HEAD_SIZE] matrix in global memory
+  // - We load the slice for the current head (head_idx) into shared memory
+  // - Using all NUM_THREADS threads to load, regardless of their dimensional arrangement
+  // - Each thread may load multiple elements if PALU_HEAD_SIZE * HEAD_SIZE > NUM_THREADS
+  // - Strided loading ensures even distribution of work across threads
+  // - __syncthreads() at the end ensures all data is loaded before computation begins
+  __shared__ scalar_t shared_palu_k_up_proj[PALU_HEAD_SIZE][HEAD_SIZE];
+
+  const int num_elements = PALU_HEAD_SIZE * HEAD_SIZE;
+  for (int i = threadIdx.x; i < num_elements; i += NUM_THREADS) {
+      int row = i / HEAD_SIZE;
+      int col = i % HEAD_SIZE;
+      shared_palu_k_up_proj[row][col] = palu_k_up_proj[kv_head_idx * num_elements + i];
+  }
+  __syncthreads();
+
   // Load the query to registers.
   // Each thread in a thread group has a different part of the query.
   // For example, if the the thread group size is 4, then the first thread in
@@ -317,23 +334,6 @@ __device__ void paged_attention_mlrd_palu_kernel(
       // k_vecs and k_vecs_up have all the elements of a single token of a single key head.
       Q_vec k_vecs_up[NUM_VECS_PER_THREAD];
       
-      // Load palu_k_up_proj matrix into shared memory
-      // - palu_k_up_proj is a [num_kv_heads, PALU_HEAD_SIZE, HEAD_SIZE] matrix in global memory
-      // - We load the slice for the current head (head_idx) into shared memory
-      // - Using all NUM_THREADS threads to load, regardless of their dimensional arrangement
-      // - Each thread may load multiple elements if PALU_HEAD_SIZE * HEAD_SIZE > NUM_THREADS
-      // - Strided loading ensures even distribution of work across threads
-      // - __syncthreads() at the end ensures all data is loaded before computation begins
-      __shared__ scalar_t shared_palu_k_up_proj[PALU_HEAD_SIZE][HEAD_SIZE];
-
-      const int num_elements = PALU_HEAD_SIZE * HEAD_SIZE;
-      for (int i = threadIdx.x; i < num_elements; i += NUM_THREADS) {
-          int row = i / HEAD_SIZE;
-          int col = i % HEAD_SIZE;
-          shared_palu_k_up_proj[row][col] = palu_k_up_proj[kv_head_idx * num_elements + i];
-      }
-      __syncthreads();
-
       // Up projection with matrix [PALU_HEAD_SIZE, HEAD_SIZE] per thread, k_vecs and k_vecs_up are per thread.
       // NUM_VECS_PER_THREAD is equal to NUM_PALU_VECS_PER_THREAD.
       // For examples, let's assume k_vecs = [64 elements][64 elements] and k_vecs_up = [128 elements][128 elements].
@@ -342,6 +342,11 @@ __device__ void paged_attention_mlrd_palu_kernel(
       // The index of resulting dot product is stored in k_vecs_up.
       for (int j = 0; j < HEAD_SIZE; j += VEC_SIZE) {
           Q_vec result;
+          // Initialize result to zero
+          for (int l = 0; l < VEC_SIZE; l++) {
+              reinterpret_cast<scalar_t*>(&result)[l] = 0;
+          }
+
           for (int i = 0; i < PALU_HEAD_SIZE; i++) {
               K_vec k_vec = k_vecs[i / PALU_VEC_SIZE];
               scalar_t k_elem = reinterpret_cast<scalar_t*>(&k_vec)[i % PALU_VEC_SIZE];
